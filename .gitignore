@@ -4,3 +4,9 @@ fluvius_indicators.csv
 fluvius_wide_format.csv
 Development.ipynb
 *.csv
+GEMINI.md
+*.png
+*.svg
+*.parquet
+*.joblib
+*.pyc
