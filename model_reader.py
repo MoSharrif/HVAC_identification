@@ -8,7 +8,7 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 import seaborn as sns
 
 
-def train_xgboost_model(features, labels, save_path="xgboost_model.json"):
+def train_xgboost_model(features, labels, save_path="xgboost_model.joblib"):
     """
     Trains an XGBoost model with the provided features and labels and saves the model to a file.
     

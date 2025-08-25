@@ -1,0 +1,12 @@
+# I need the large dataset to remain local
+all_time_series_Consumption.pkl
+fluvius_indicators.csv
+fluvius_wide_format.csv
+Development.ipynb
+*.csv
+GEMINI.md
+*.png
+*.svg
+*.parquet
+*.joblib
+*.pyc
