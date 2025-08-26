@@ -1307,7 +1307,7 @@ def create_real_data_classifier(X_real, y_real):
 
     return best_xgb_model, X_test, y_test, label_encoder, classification_report_dict
 
-def create_real_data_performance_figure(classification_report_dict, save_path='figures/real_data_performance.png'):
+def create_real_data_performance_figure(classification_report_dict_real_data, classification_report_dict_synthetic_data, save_path='figures/real_data_performance.png'):
     """
     Create a bar chart showing F1-score, precision, and recall for XGBoost trained on real data.
     
@@ -1347,14 +1347,14 @@ def create_real_data_performance_figure(classification_report_dict, save_path='f
     precisions = []
     recalls = []
     
-    for class_name in classification_report_dict.keys():
+    for class_name in classification_report_dict_real_data.keys():
         if class_name not in ['accuracy', 'macro avg', 'weighted avg']:
             # Apply class name mapping
             display_name = class_name_mapping.get(class_name, class_name)
             classes.append(display_name)
-            f1_scores.append(classification_report_dict[class_name]['f1-score'])
-            precisions.append(classification_report_dict[class_name]['precision'])
-            recalls.append(classification_report_dict[class_name]['recall'])
+            f1_scores.append(classification_report_dict_real_data[class_name]['f1-score'])
+            precisions.append(classification_report_dict_real_data[class_name]['precision'])
+            recalls.append(classification_report_dict_real_data[class_name]['recall'])
     
     # Sort by class name for consistent ordering
     sorted_data = sorted(zip(classes, f1_scores, precisions, recalls))
@@ -1560,7 +1560,7 @@ def train_synthetic_data_models(X_real, y_real, force_retrain=False, force_recal
     return performance_results
 
 
-def run_test_2(X_real, y_real, real_labels_df, real_time_series, save_path, force_retrain=False):
+def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df, real_time_series, save_path, force_retrain=False):
     # ==============================================================================
     # SECOND STUDY: Train on Real Data, Label Synthetic Data, Compare Distributions
     # ==============================================================================
@@ -1610,7 +1610,6 @@ def run_test_2(X_real, y_real, real_labels_df, real_time_series, save_path, forc
     print("\n🎯 Step 2: Loading large synthetic dataset and predicting labels...")
     
     # Use the unlabeled synthetic dataset (10,000 profiles)
-    # synthetic_timeSeries_large = load_10_000_unlabeled_synthetic_profiles()
     synthetic_timeSeries_large = load_1300_unlabeled_synthetic_profiles()
     
     print(f"Large synthetic dataset:")
@@ -1701,16 +1700,15 @@ def main():
         X_real, y_real, model_name="real_data_classifier", force_retrain=force_retrain
     )
 
-    create_real_data_performance_figure(classification_report_dict, save_path='figures/real_data_performance_real_model.svg')
-    
     performance_results_synthetic_data_models = train_synthetic_data_models(
         X_real, 
         y_real, 
         force_retrain=force_retrain, 
         force_recalculate_features=force_recalculate_features
     )
-
-    run_test_2(X_real, y_real, real_labels_df, real_time_series, save_path='figures/label_distribution_comparison_with_min.svg', force_retrain=force_retrain)
+    create_real_data_performance_figure(classification_report_dict, performance_results_synthetic_data_models, save_path='figures/real_data_performance_real_model.svg')
+    
+    label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df, real_time_series, save_path='figures/label_distribution_comparison_with_min.svg', force_retrain=force_retrain)
 
 
     # Create comparison figure
