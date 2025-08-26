@@ -371,7 +371,7 @@ def train_XGBoost_with_proper_split_optimized(X, y, test_size=0.2, random_state=
     return best_xgb_model, X_test, y_test, label_encoder
 
 
-def calculate_features_optimized(labels_df, time_series):
+def calculate_features_optimized(labels_df, time_series, scenario_name):
     """
     Optimized version of calculate_features with improved performance:
     - Pre-convert datetime index once
@@ -398,7 +398,7 @@ def calculate_features_optimized(labels_df, time_series):
         std = resampled.std()
         max_ = resampled.max()
         skew = resampled.apply(pd.Series.skew)
-        sum_ = resampled.sum()
+
         # min = resampled.min()
         
         # Peak-to-average ratio: vectorized calculation
@@ -414,12 +414,17 @@ def calculate_features_optimized(labels_df, time_series):
         std.index = [f"{prefix}_std_{i}" for i in range(n_periods)]
         skew.index = [f"{prefix}_skew_{i}" for i in range(n_periods)]
         max_.index = [f"{prefix}_max_{i}" for i in range(n_periods)]
-        sum_.index = [f"{prefix}_sum_{i}" for i in range(n_periods)]
+
         # min.index = [f"{prefix}_min_{i}" for i in range(n_periods)]
         peak_to_avg.index = [f"{prefix}_peak_to_avg_{i}" for i in range(n_periods)]
         
         # Concatenate all features efficiently
-        features = pd.concat([mean, std, skew, max_, sum_, peak_to_avg], axis=0)
+        if "sum" in scenario_name:
+            sum_ = resampled.sum()
+            sum_.index = [f"{prefix}_sum_{i}" for i in range(n_periods)]
+            features = pd.concat([mean, std, skew, max_, sum_, peak_to_avg], axis=0)
+        else:
+            features = pd.concat([mean, std, skew, max_, peak_to_avg], axis=0)
         
         # Convert to DataFrame format expected by downstream code
         features = features.reset_index()
@@ -436,11 +441,18 @@ def calculate_features_optimized(labels_df, time_series):
     
     print("Extracting annual features...")
     annual_features = extract_time_features_optimized(time_series, 'YE', 'A')
-    
-    # Combine features efficiently
-    print("Combining features...")
-    combined_features = pd.concat([weekly_features, monthly_features, annual_features], 
+
+    if "daily" in scenario_name:
+        print("================================================")
+        print("DAILY FEATURES ARE ADDED")
+        print("================================================")
+        daily_features = extract_time_features_optimized(time_series, 'D', 'D')
+        combined_features = pd.concat([daily_features, weekly_features, monthly_features, annual_features], 
                                  axis=0, ignore_index=True)
+    else:
+        combined_features = pd.concat([weekly_features, monthly_features, annual_features], 
+                                 axis=0, ignore_index=True)
+
 
     # Reshape efficiently
     feature_names = combined_features['feature'].values
@@ -466,7 +478,7 @@ def calculate_features_optimized(labels_df, time_series):
     
     return X, y
 
-def calculate_features_cached(labels_df, time_series, cache_key=None, force_recalculate=False):
+def calculate_features_cached(labels_df, time_series, scenario_name, cache_key=None, force_recalculate=False):
     """
     Cached version of feature calculation with disk persistence to avoid redundant computations.
     
@@ -485,7 +497,7 @@ def calculate_features_cached(labels_df, time_series, cache_key=None, force_reca
     """
     if not cache_key:
         print("No cache key provided, calculating features without caching")
-        return calculate_features_optimized(labels_df, time_series)
+        return calculate_features_optimized(labels_df, time_series, scenario_name)
     
     # Check disk cache (fast)
     if not force_recalculate and feature_cache_exists(cache_key):
@@ -506,7 +518,7 @@ def calculate_features_cached(labels_df, time_series, cache_key=None, force_reca
         print(f"⚙️ Calculating features for {cache_key or 'unknown dataset'}")
     
     start_time = time.time()
-    X, y = calculate_features_optimized(labels_df, time_series)
+    X, y = calculate_features_optimized(labels_df, time_series, scenario_name)
     calculation_time = time.time() - start_time
     
     print(f"✅ Feature calculation completed in {calculation_time:.2f} seconds")
@@ -1405,7 +1417,7 @@ def calculate_all_synthetic_features(scenario_name, force_recalculate_features=F
     labels_df_1300 = create_labels_for_original_shape_synthetic_profiles()
     synthetic_timeSeries_1300 = load_synthetic_profiles_in_originial_shape()
     X_synthetic_1300, y_synthetic_1300 = calculate_features_cached(
-        labels_df_1300, synthetic_timeSeries_1300, cache_key=f"synthetic_1300_{scenario_name}", 
+        labels_df_1300, synthetic_timeSeries_1300, scenario_name, cache_key=f"synthetic_1300_{scenario_name}", 
         force_recalculate=force_recalculate_features
     )
     
@@ -1413,7 +1425,7 @@ def calculate_all_synthetic_features(scenario_name, force_recalculate_features=F
     labels_df_5000 = create_1000_labels_df()
     synthetic_timeSeries_5000 = load_synthetic_1000_profiles_per_type()
     X_synthetic_5000, y_synthetic_5000 = calculate_features_cached(
-        labels_df_5000, synthetic_timeSeries_5000, cache_key=f"synthetic_5000_{scenario_name}",
+        labels_df_5000, synthetic_timeSeries_5000, scenario_name, cache_key=f"synthetic_5000_{scenario_name}",
         force_recalculate=force_recalculate_features
     )
     
@@ -1421,7 +1433,7 @@ def calculate_all_synthetic_features(scenario_name, force_recalculate_features=F
     labels_df_25000 = create_labels_for_5000_synthetic_profiles_per_type()
     synthetic_timeSeries_25000 = load_5000_synthetic_profiles_per_type()
     X_synthetic_25000, y_synthetic_25000 = calculate_features_cached(
-        labels_df_25000, synthetic_timeSeries_25000, cache_key=f"synthetic_25000_{scenario_name}",
+        labels_df_25000, synthetic_timeSeries_25000, scenario_name, cache_key=f"synthetic_25000_{scenario_name}",
         force_recalculate=force_recalculate_features
     )
 
@@ -1429,7 +1441,7 @@ def calculate_all_synthetic_features(scenario_name, force_recalculate_features=F
     labels_df_50000 = create_labels_for_50_000_labels_df()
     synthetic_timeSeries_50000 = load_50_000_synthetic_profiles_per_type()
     X_synthetic_50000, y_synthetic_50000 = calculate_features_cached(
-        labels_df_50000, synthetic_timeSeries_50000, cache_key=f"synthetic_50000_{scenario_name}",
+        labels_df_50000, synthetic_timeSeries_50000, scenario_name, cache_key=f"synthetic_50000_{scenario_name}",
         force_recalculate=force_recalculate_features
     )
 
@@ -1437,7 +1449,7 @@ def calculate_all_synthetic_features(scenario_name, force_recalculate_features=F
     labels_df_100000 = create_labels_for_100_000_labels_df()
     synthetic_timeSeries_100000 = load_100_000_synthetic_profiles_per_type()
     X_synthetic_100000, y_synthetic_100000 = calculate_features_cached(
-        labels_df_100000, synthetic_timeSeries_100000, cache_key=f"synthetic_100000_{scenario_name}",
+        labels_df_100000, synthetic_timeSeries_100000, scenario_name, cache_key=f"synthetic_100000_{scenario_name}",
         force_recalculate=force_recalculate_features
     )
     
@@ -1594,7 +1606,7 @@ def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df
         'ID': range(1, synthetic_timeSeries_large.shape[1] + 1),
         'Category': ['NONE'] * synthetic_timeSeries_large.shape[1]  # Dummy category, will be ignored
     })
-    X_synthetic_large, _ = calculate_features_cached(dummy_labels_df, synthetic_timeSeries_large, cache_key=f"synthetic_large_unlabeled_{scenario_name}", force_recalculate=force_retrain)
+    X_synthetic_large, _ = calculate_features_cached(dummy_labels_df, synthetic_timeSeries_large, scenario_name, cache_key=f"synthetic_large_unlabeled_{scenario_name}", force_recalculate=force_retrain)
     
     # Predict labels using the real-data-trained model
     y_synthetic_pred_encoded = xgb_real_model.predict(X_synthetic_large)
@@ -1605,7 +1617,7 @@ def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df
     # create the same for the labelled synthetic data to see if there is a big difference
     labeled_synthetic_data = load_synthetic_profiles_in_originial_shape()
     synthetic_labels = create_labels_for_original_shape_synthetic_profiles()
-    X_synthetic_labeled, _ = calculate_features_cached(synthetic_labels, labeled_synthetic_data, cache_key=f"synthetic_labeled_{scenario_name}", force_recalculate=force_retrain)
+    X_synthetic_labeled, _ = calculate_features_cached(synthetic_labels, labeled_synthetic_data, scenario_name, cache_key=f"synthetic_labeled_{scenario_name}", force_recalculate=force_retrain)
     y_synthetic_labeled_pred_encoded = xgb_real_model.predict(X_synthetic_labeled)
     y_synthetic_labeled_pred = label_encoder_real_full.inverse_transform(y_synthetic_labeled_pred_encoded)
     print(f"Predicted label distribution: {pd.Series(y_synthetic_labeled_pred).value_counts().to_dict()}")
@@ -1616,7 +1628,7 @@ def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df
         'Category': ['NONE'] * 10_000 # Dummy category, will be ignored
     })
     synthetic_data_10000 = load_10_000_unlabeled_synthetic_profiles()
-    X_synthetic_10000, _ = calculate_features_cached(dummy_labels_df_10000, synthetic_data_10000, cache_key=f"synthetic_unlabeled_10000_{scenario_name}", force_recalculate=force_retrain)
+    X_synthetic_10000, _ = calculate_features_cached(dummy_labels_df_10000, synthetic_data_10000, scenario_name, cache_key=f"synthetic_unlabeled_10000_{scenario_name}", force_recalculate=force_retrain)
     y_synthetic_10000_pred_encoded = xgb_real_model.predict(X_synthetic_10000)
     y_synthetic_10000_pred = label_encoder_real_full.inverse_transform(y_synthetic_10000_pred_encoded)
     print(f"Predicted label distribution: {pd.Series(y_synthetic_10000_pred).value_counts().to_dict()}")
@@ -1680,9 +1692,9 @@ def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df
 def main():
     """Main function with command line argument support."""
 
-    force_retrain = True
-    force_recalculate_features = True
-    SCENARIO_NAME = "sum"
+    force_retrain = False
+    force_recalculate_features = False
+    SCENARIO_NAME = "sum" # sum will include the sum as feature. "daily" will include daily features
 
     # load real data
     real_labels_df = pd.read_csv(pathlib.Path("input_data") / "fluvius_indicators.csv")
@@ -1695,8 +1707,8 @@ def main():
     
     # Calculate features for real data once
     print("  Calculating real data features...")
-    X_real, y_real = calculate_features_cached(real_labels_df, real_time_series, 
-                                               cache_key="real_data", 
+    X_real, y_real = calculate_features_cached(real_labels_df, real_time_series, SCENARIO_NAME, 
+                                               cache_key=f"real_data_{SCENARIO_NAME}", 
                                                force_recalculate=force_recalculate_features)
     
     # Calculate features for synthetic datasets once
