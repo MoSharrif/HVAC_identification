@@ -398,6 +398,7 @@ def calculate_features_optimized(labels_df, time_series):
         std = resampled.std()
         max_ = resampled.max()
         skew = resampled.apply(pd.Series.skew)
+        sum_ = resampled.sum()
         # min = resampled.min()
         
         # Peak-to-average ratio: vectorized calculation
@@ -413,11 +414,12 @@ def calculate_features_optimized(labels_df, time_series):
         std.index = [f"{prefix}_std_{i}" for i in range(n_periods)]
         skew.index = [f"{prefix}_skew_{i}" for i in range(n_periods)]
         max_.index = [f"{prefix}_max_{i}" for i in range(n_periods)]
+        sum_.index = [f"{prefix}_sum_{i}" for i in range(n_periods)]
         # min.index = [f"{prefix}_min_{i}" for i in range(n_periods)]
         peak_to_avg.index = [f"{prefix}_peak_to_avg_{i}" for i in range(n_periods)]
         
         # Concatenate all features efficiently
-        features = pd.concat([mean, std, skew, max_, peak_to_avg], axis=0)
+        features = pd.concat([mean, std, skew, max_, sum_, peak_to_avg], axis=0)
         
         # Convert to DataFrame format expected by downstream code
         features = features.reset_index()
@@ -915,7 +917,7 @@ def compare_model_with_different_synthetic_training_sizes(results_dict, performa
         
     
     ax.set_xlabel('Synthetic data size', fontsize=14)
-    ax.set_ylabel('F1-Score difference to f1-score fromreal data', fontsize=14)
+    ax.set_ylabel('F1-Score difference', fontsize=14)
     ax.set_xticks(np.arange(len(data_labels)))
     ax.set_yticklabels(labels=ax.get_yticklabels(), fontsize=14)
     ax.set_xticklabels(data_labels, rotation=0, ha='center', fontsize=14)
@@ -999,12 +1001,13 @@ def create_label_distribution_comparison(real_labels, predicted_labels, save_pat
                            label='Predicted on Synthetic', color='#F18F01', alpha=0.8, 
                            edgecolor='black', linewidth=1)
         
-        ax.set_xlabel('Category', fontsize=14, fontweight='bold')
-        ax.set_ylabel('Percentage (%)', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Category', fontsize=14)
+        ax.set_ylabel('Occurrence of label in data (%)', fontsize=14)
         ax.set_xticks(x)
-        ax.set_xticklabels(all_categories, rotation=45, ha='right')
+        ax.set_xticklabels(all_categories, rotation=0, ha='center', fontsize=14)
+        ax.set_yticklabels(labels=ax.get_yticklabels(), fontsize=14)
         ax.set_ylim(0, max(real_percentages.max(), pred_percentages.max()) * 1.1)
-        ax.legend(fontsize=12)
+        ax.legend(fontsize=14)
         ax.grid(True, alpha=0.3, axis='y')
         
         # Add percentage labels on bars
@@ -1200,11 +1203,12 @@ def create_hourly_consumption_comparison(real_labels_df, real_time_series, synth
                 print(f"  ✅ Synthetic {category}: {len(category_columns)} profiles plotted")
     
     # Customize the plot
-    ax.set_xlabel('Hour of Day', fontsize=14, fontweight='bold')
-    ax.set_ylabel('Mean Consumption (kWh)', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Hour of Day', fontsize=14)
+    ax.set_ylabel('Mean Consumption (kWh)', fontsize=14)
     ax.set_xticks(range(0, 24, 2))
-    ax.set_xticklabels([f'{h:02d}:00' for h in range(0, 24, 2)])
-    ax.grid(True, alpha=0.3)
+    ax.set_xticklabels([f'{h:02d}:00' for h in range(0, 24, 2)], fontsize=14)
+    ax.set_yticklabels(labels=ax.get_yticklabels(), fontsize=14)
+    ax.grid(True, alpha=0.3, axis='y')
     
     # Manually create legend entries with consistent colors
     from matplotlib.lines import Line2D
@@ -1275,7 +1279,7 @@ def create_hourly_consumption_comparison(real_labels_df, real_time_series, synth
     ])
     
     # Create the manual legend
-    ax.legend(handles=legend_elements, loc='upper left', fontsize=9, framealpha=0.9)
+    ax.legend(handles=legend_elements, loc='upper left', fontsize=14, framealpha=0.9)
     
     # Adjust layout and save
     plt.tight_layout()
@@ -1283,8 +1287,7 @@ def create_hourly_consumption_comparison(real_labels_df, real_time_series, synth
     plt.show()
     
     print(f"\n✅ Hourly consumption comparison saved to: {save_path}")
-    
-    return fig
+
 
 def create_real_data_classifier(X_real, y_real):
     """
@@ -1397,12 +1400,12 @@ def create_real_data_performance_figure(classification_report_dict_real_data, cl
     plt.show()
 
 
-def calculate_all_synthetic_features(force_recalculate_features=False) -> dict[str, tuple[pd.DataFrame, pd.Series]]:
+def calculate_all_synthetic_features(scenario_name, force_recalculate_features=False) -> dict[str, tuple[pd.DataFrame, pd.Series]]:
     # Original shape (1,300 profiles) - cached
     labels_df_1300 = create_labels_for_original_shape_synthetic_profiles()
     synthetic_timeSeries_1300 = load_synthetic_profiles_in_originial_shape()
     X_synthetic_1300, y_synthetic_1300 = calculate_features_cached(
-        labels_df_1300, synthetic_timeSeries_1300, cache_key="synthetic_1300", 
+        labels_df_1300, synthetic_timeSeries_1300, cache_key=f"synthetic_1300_{scenario_name}", 
         force_recalculate=force_recalculate_features
     )
     
@@ -1410,7 +1413,7 @@ def calculate_all_synthetic_features(force_recalculate_features=False) -> dict[s
     labels_df_5000 = create_1000_labels_df()
     synthetic_timeSeries_5000 = load_synthetic_1000_profiles_per_type()
     X_synthetic_5000, y_synthetic_5000 = calculate_features_cached(
-        labels_df_5000, synthetic_timeSeries_5000, cache_key="synthetic_5000",
+        labels_df_5000, synthetic_timeSeries_5000, cache_key=f"synthetic_5000_{scenario_name}",
         force_recalculate=force_recalculate_features
     )
     
@@ -1418,7 +1421,7 @@ def calculate_all_synthetic_features(force_recalculate_features=False) -> dict[s
     labels_df_25000 = create_labels_for_5000_synthetic_profiles_per_type()
     synthetic_timeSeries_25000 = load_5000_synthetic_profiles_per_type()
     X_synthetic_25000, y_synthetic_25000 = calculate_features_cached(
-        labels_df_25000, synthetic_timeSeries_25000, cache_key="synthetic_25000",
+        labels_df_25000, synthetic_timeSeries_25000, cache_key=f"synthetic_25000_{scenario_name}",
         force_recalculate=force_recalculate_features
     )
 
@@ -1426,7 +1429,7 @@ def calculate_all_synthetic_features(force_recalculate_features=False) -> dict[s
     labels_df_50000 = create_labels_for_50_000_labels_df()
     synthetic_timeSeries_50000 = load_50_000_synthetic_profiles_per_type()
     X_synthetic_50000, y_synthetic_50000 = calculate_features_cached(
-        labels_df_50000, synthetic_timeSeries_50000, cache_key="synthetic_50000",
+        labels_df_50000, synthetic_timeSeries_50000, cache_key=f"synthetic_50000_{scenario_name}",
         force_recalculate=force_recalculate_features
     )
 
@@ -1434,7 +1437,7 @@ def calculate_all_synthetic_features(force_recalculate_features=False) -> dict[s
     labels_df_100000 = create_labels_for_100_000_labels_df()
     synthetic_timeSeries_100000 = load_100_000_synthetic_profiles_per_type()
     X_synthetic_100000, y_synthetic_100000 = calculate_features_cached(
-        labels_df_100000, synthetic_timeSeries_100000, cache_key="synthetic_100000",
+        labels_df_100000, synthetic_timeSeries_100000, cache_key=f"synthetic_100000_{scenario_name}",
         force_recalculate=force_recalculate_features
     )
     
@@ -1444,11 +1447,11 @@ def calculate_all_synthetic_features(force_recalculate_features=False) -> dict[s
         ("1300", X_synthetic_1300, y_synthetic_1300, "Original Shape Profiles (1,300)"),
         ("4000", X_synthetic_5000, y_synthetic_5000, "1000 Profiles Per Type"),
         ("25000", X_synthetic_25000, y_synthetic_25000, "5000 Profiles Per Type"),
-        ("50000", X_synthetic_50000, y_synthetic_50000, "50,000 Profiles Per Type"),
-        ("100000", X_synthetic_100000, y_synthetic_100000, "100,000 Profiles Per Type"),
+        ("250000", X_synthetic_50000, y_synthetic_50000, "50,000 Profiles Per Type"),
+        ("400000", X_synthetic_100000, y_synthetic_100000, "100,000 Profiles Per Type"),
     ]
 
-def train_synthetic_data_models(X_real, y_real, force_retrain=False, force_recalculate_features=False):
+def train_synthetic_data_models(X_real, y_real, scenario_name, force_retrain=False, force_recalculate_features=False):
     """
     Optimized version of run_test_1 with performance improvements:
     - Uses cached feature calculations
@@ -1473,7 +1476,7 @@ def train_synthetic_data_models(X_real, y_real, force_retrain=False, force_recal
 
     print("🎯 Using optimized 80/20 train/test split with evaluation on held-out test set")
 
-    experiments = calculate_all_synthetic_features(force_recalculate_features=force_recalculate_features)
+    experiments = calculate_all_synthetic_features(scenario_name, force_recalculate_features=force_recalculate_features)
 
     for key, X_data, y_data, description in experiments:
         print(f"\n{'='*50}")
@@ -1482,7 +1485,7 @@ def train_synthetic_data_models(X_real, y_real, force_retrain=False, force_recal
         
         start_time = time.time()
         
-        model_name = f"synthetic_{key}_classifier"
+        model_name = f"synthetic_{key}_classifier_{scenario_name}"
 
         if not force_retrain and model_exists(model_name):
             print(f"🔄 Loading existing model '{model_name}'...")
@@ -1534,7 +1537,7 @@ def train_synthetic_data_models(X_real, y_real, force_retrain=False, force_recal
     return performance_results
 
 
-def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df, real_time_series, save_path, force_retrain=False):
+def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df, real_time_series, save_path, scenario_name, force_retrain=False):
     # ==============================================================================
     # SECOND STUDY: Train on Real Data, Label Synthetic Data, Compare Distributions
     # ==============================================================================
@@ -1544,7 +1547,7 @@ def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df
     print("Training XGBoost on Real Data → Labeling Synthetic Profiles")
     print("="*70)
     
-    model_name = "real_data_full_classifier"
+    model_name = f"real_data_full_classifier_{scenario_name}"
 
     if not force_retrain and model_exists(model_name):
         print(f"🔄 Loading existing model '{model_name}'...")
@@ -1585,17 +1588,13 @@ def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df
     
     # Use the unlabeled synthetic dataset (10,000 profiles)
     synthetic_timeSeries_large = load_1300_unlabeled_synthetic_profiles()
-    
-    print(f"Large synthetic dataset:")
-    print(f"  Total profiles: {synthetic_timeSeries_large.shape[1]}")
-    
     # Calculate features for synthetic data (without labels since it's unlabeled data)
     # We need to create a dummy labels dataframe just for the feature calculation function
     dummy_labels_df = pd.DataFrame({
         'ID': range(1, synthetic_timeSeries_large.shape[1] + 1),
         'Category': ['NONE'] * synthetic_timeSeries_large.shape[1]  # Dummy category, will be ignored
     })
-    X_synthetic_large, _ = calculate_features_cached(dummy_labels_df, synthetic_timeSeries_large, cache_key="synthetic_large_unlabeled", force_recalculate=force_retrain)
+    X_synthetic_large, _ = calculate_features_cached(dummy_labels_df, synthetic_timeSeries_large, cache_key=f"synthetic_large_unlabeled_{scenario_name}", force_recalculate=force_retrain)
     
     # Predict labels using the real-data-trained model
     y_synthetic_pred_encoded = xgb_real_model.predict(X_synthetic_large)
@@ -1606,15 +1605,28 @@ def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df
     # create the same for the labelled synthetic data to see if there is a big difference
     labeled_synthetic_data = load_synthetic_profiles_in_originial_shape()
     synthetic_labels = create_labels_for_original_shape_synthetic_profiles()
-    X_synthetic_labeled, _ = calculate_features_cached(synthetic_labels, labeled_synthetic_data, cache_key="synthetic_labeled", force_recalculate=force_retrain)
+    X_synthetic_labeled, _ = calculate_features_cached(synthetic_labels, labeled_synthetic_data, cache_key=f"synthetic_labeled_{scenario_name}", force_recalculate=force_retrain)
     y_synthetic_labeled_pred_encoded = xgb_real_model.predict(X_synthetic_labeled)
     y_synthetic_labeled_pred = label_encoder_real_full.inverse_transform(y_synthetic_labeled_pred_encoded)
     print(f"Predicted label distribution: {pd.Series(y_synthetic_labeled_pred).value_counts().to_dict()}")
+
+    # create the same for more unlabeled synthetic data to exclude the random difference of generated data
+    dummy_labels_df_10000 = pd.DataFrame({
+        'ID': range(1, 10_000 + 1),
+        'Category': ['NONE'] * 10_000 # Dummy category, will be ignored
+    })
+    synthetic_data_10000 = load_10_000_unlabeled_synthetic_profiles()
+    X_synthetic_10000, _ = calculate_features_cached(dummy_labels_df_10000, synthetic_data_10000, cache_key=f"synthetic_unlabeled_10000_{scenario_name}", force_recalculate=force_retrain)
+    y_synthetic_10000_pred_encoded = xgb_real_model.predict(X_synthetic_10000)
+    y_synthetic_10000_pred = label_encoder_real_full.inverse_transform(y_synthetic_10000_pred_encoded)
+    print(f"Predicted label distribution: {pd.Series(y_synthetic_10000_pred).value_counts().to_dict()}")
+
+    # create the same for the labelled synthetic data to see if there is a big difference
     
     # Step 3: Create comparison visualization
     print("\n🎯 Step 3: Creating label distribution comparison...")
     
-    # Create the comparison figure
+    # Create the comparison figures
     create_label_distribution_comparison(
         real_labels_df['Category'], 
         y_synthetic_pred,
@@ -1624,10 +1636,15 @@ def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df
     create_label_distribution_comparison(
         real_labels_df['Category'], 
         y_synthetic_labeled_pred,
-        save_path="figures/label_distribution_comparison_labeled.svg"
+        save_path=save_path.replace(".svg", "_labeled_1300.svg")
     )
-    
-    print(f"\n✅ Label distribution comparison of labeled synthetic data saved to: figures/label_distribution_comparison_labeled.svg")
+    print(f"\n✅ Label distribution comparison of labeled synthetic data saved to: figures/label_distribution_comparison_labeled_1300.svg")
+    create_label_distribution_comparison(
+        real_labels_df['Category'], 
+        y_synthetic_10000_pred,
+        save_path=save_path.replace(".svg", "_10000.svg")
+    )
+    print(f"\n✅ Label distribution comparison of unlabeled synthetic data saved to: figures/label_distribution_comparison_unlabeled_10000.svg")
     
     # Step 4: Create hourly consumption comparison
     print("\n🎯 Step 4: Creating hourly consumption pattern comparison...")
@@ -1647,18 +1664,25 @@ def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df
         real_time_series, 
         y_synthetic_labeled_pred, 
         labeled_synthetic_data,
-        save_path="figures/hourly_consumption_comparison_labeled.svg"
+        save_path=save_path.replace(".svg", "_labeled.svg").replace("label_distribution", "hourly_consumption")
     )
 
-
+    create_hourly_consumption_comparison(
+        real_labels_df, 
+        real_time_series, 
+        y_synthetic_10000_pred, 
+        synthetic_data_10000,
+        save_path=save_path.replace(".svg", "_10000.svg").replace("label_distribution", "hourly_consumption")
+    )
 
 
 
 def main():
     """Main function with command line argument support."""
 
-    force_retrain = False
-    force_recalculate_features = False
+    force_retrain = True
+    force_recalculate_features = True
+    SCENARIO_NAME = "sum"
 
     # load real data
     real_labels_df = pd.read_csv(pathlib.Path("input_data") / "fluvius_indicators.csv")
@@ -1689,7 +1713,7 @@ def main():
     print(f"Force recalculate features: {force_recalculate_features}")
     
     real_model, X_test_real, y_test_real, label_encoder_real, classification_report_dict_real_data = get_or_train_real_data_model(
-        X_real, y_real, model_name="real_data_classifier", force_retrain=force_retrain
+        X_real, y_real, model_name=f"real_data_classifier_{SCENARIO_NAME}", force_retrain=force_retrain
     )
     performance_results_real_data = {
         'macro_f1': classification_report_dict_real_data['macro avg']['f1-score'],
@@ -1717,12 +1741,11 @@ def main():
         force_recalculate_features=force_recalculate_features
     )
 
-    compare_model_with_different_synthetic_training_sizes(performance_results_synthetic_data_models, performance_results_real_data, save_path='figures/performance_comparison.png')
+    compare_model_with_different_synthetic_training_sizes(performance_results_synthetic_data_models, performance_results_real_data, save_path=f'figures/performance_comparison_{SCENARIO_NAME}.svg')
 
-    create_real_data_performance_figure(classification_report_dict_real_data, performance_results_synthetic_data_models, save_path='figures/real_data_performance_real_model.svg')
-    
-    
-    label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df, real_time_series, save_path='figures/label_distribution_comparison_with_min.svg', force_retrain=force_retrain)
+    create_real_data_performance_figure(classification_report_dict_real_data, performance_results_synthetic_data_models, save_path=f'figures/real_data_performance_real_model_{SCENARIO_NAME}.svg')
+     
+    label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df, real_time_series, save_path=f'figures/label_distribution_comparison_{SCENARIO_NAME}.svg', scenario_name=SCENARIO_NAME, force_retrain=force_retrain)
 
 
 
