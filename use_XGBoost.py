@@ -1737,6 +1737,7 @@ def main():
     performance_results_synthetic_data_models = train_synthetic_data_models(
         X_real, 
         y_real, 
+        scenario_name=SCENARIO_NAME,
         force_retrain=force_retrain, 
         force_recalculate_features=force_recalculate_features
     )
