@@ -247,7 +247,6 @@ def get_or_train_real_data_model(X_real, y_real, model_name="real_data_classifie
         
         # Save the model
         save_model(model, label_encoder, classification_report_dict, model_name)
-        
         return model, X_test, y_test, label_encoder, classification_report_dict
 
 def list_saved_models():
@@ -825,7 +824,7 @@ def create_labels_for_5000_synthetic_profiles_per_type():
     labels_df = pd.DataFrame({"Category": flat_list, "ID": np.arange(1, 25001)})
     return labels_df
 
-def create_publication_comparison_figure(results_dict, save_path='figures/performance_comparison.png'):
+def compare_model_with_different_synthetic_training_sizes(results_dict, performance_results_real_data, save_path='figures/performance_comparison.png'):
     """
     Create a publication-quality figure showing per-class XGBoost performance across different training data sizes.
     
@@ -836,9 +835,6 @@ def create_publication_comparison_figure(results_dict, save_path='figures/perfor
     # Set publication-quality style
     plt.style.use('default')
     sns.set_palette("husl")
-    
-    # Create figure with single subplot for per-class performance
-    fig, ax = plt.subplots(1, 1, figsize=(12, 8))
     
     # Class name mapping for better readability
     class_name_mapping = {
@@ -851,76 +847,79 @@ def create_publication_comparison_figure(results_dict, save_path='figures/perfor
     
     # Function to rename class names in results
     def rename_classes_in_results(results):
-        if 'per_class_f1' in results:
-            renamed_per_class = {}
-            for old_name, f1_score in results['per_class_f1'].items():
-                new_name = class_name_mapping.get(old_name, old_name)
-                renamed_per_class[new_name] = f1_score
-            results_copy = results.copy()
-            results_copy['per_class_f1'] = renamed_per_class
-            return results_copy
+        renamed_per_class_f1 = {}
+        renamed_per_class_precision = {}
+        renamed_per_class_recall = {}
+        for old_name, f1_score in results["per_class_f1"].items():
+            new_name = class_name_mapping.get(old_name, old_name)
+            renamed_per_class_f1[new_name] = f1_score
+        for old_name, precision_score in results["per_class_precision"].items():
+            new_name = class_name_mapping.get(old_name, old_name)
+            renamed_per_class_precision[new_name] = precision_score
+        for old_name, recall_score in results["per_class_recall"].items():
+            new_name = class_name_mapping.get(old_name, old_name)
+            renamed_per_class_recall[new_name] = recall_score
+        results["per_class_f1"] = renamed_per_class_f1
+        results["per_class_precision"] = renamed_per_class_precision
+        results["per_class_recall"] = renamed_per_class_recall
         return results
+
     
     # Apply class name mapping to all results
-    results_dict_renamed = {}
+    synthetic_results = {}
     for key, results in results_dict.items():
-        results_dict_renamed[key] = rename_classes_in_results(results)
-    
-    # Separate real data from synthetic data results
-    real_data_results = results_dict_renamed.get("real_data", None)
-    synthetic_results = {k: v for k, v in results_dict_renamed.items() if k != "real_data"}
+        synthetic_results[key] = rename_classes_in_results(results)
     
     # Sort synthetic results by training size (convert to int for sorting, then back to string)
     synthetic_keys_sorted = sorted(synthetic_results.keys(), key=lambda x: int(x))
     
+    real_results = rename_classes_in_results(performance_results_real_data)
     # Create better x-axis labels
-    if real_data_results:
-        data_labels = ["Real Data"] + [f'Synthetic Data {size}' for size in synthetic_keys_sorted]
-    else:
-        data_labels = [f'Synthetic Data {size}' for size in synthetic_keys_sorted]
-    
+    data_labels = [f'{int(size):,}' for size in synthetic_keys_sorted]
+
     # Get all unique classes (with renamed labels)
     all_classes = set()
-    for results in results_dict_renamed.values():
+    for results in synthetic_results.values():
         all_classes.update(results['per_class_f1'].keys())
     all_classes = sorted(list(all_classes))
     
-    # Per-Class F1-Scores (single plot)
-    x = np.arange(len(data_labels))
-    width = 0.15
+
     
     # Use consistent color mapping across all plots
     consistent_colors = get_consistent_color_mapping()
-    
+    # Create figure with single subplot for per-class performance
+    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
     for i, class_name in enumerate(all_classes):
         class_f1_scores = []
-        # Add real data first if it exists
-        if real_data_results:
-            if class_name in real_data_results['per_class_f1']:
-                class_f1_scores.append(real_data_results['per_class_f1'][class_name])
-            else:
-                class_f1_scores.append(0)
-        
+        class_precision_scores = []
+        class_recall_scores = []
+ 
         # Add synthetic data results
         for size in synthetic_keys_sorted:
-            if class_name in synthetic_results[size]['per_class_f1']:
-                class_f1_scores.append(synthetic_results[size]['per_class_f1'][class_name])
-            else:
-                class_f1_scores.append(0)
+            class_f1_scores.append(synthetic_results[size]['per_class_f1'][class_name])
+            class_precision_scores.append(synthetic_results[size]['per_class_precision'][class_name])
+            class_recall_scores.append(synthetic_results[size]['per_class_recall'][class_name])
         
         # Get color for this class, fallback to gray if not in mapping
         class_color = consistent_colors.get(class_name, '#95A5A6')
+
+        # calculate difference to real data
+        class_f1_diff = np.array(class_f1_scores) - np.array(real_results['per_class_f1'][class_name])
+        class_precision_diff = np.array(class_precision_scores) - np.array(real_results['per_class_precision'][class_name])
+        class_recall_diff = np.array(class_recall_scores) - np.array(real_results['per_class_recall'][class_name])
+
+        # create subplots for difference
+        ax.plot(class_f1_diff, color=class_color, linewidth=1, alpha=1, label=class_name)
+        # ax.plot(class_precision_diff, color=class_color, linewidth=0.5, alpha=1, linestyle='--', label=class_name)
+        # ax.plot(class_recall_diff, color=class_color, linewidth=0.5, alpha=1, linestyle=':', label=class_name)
         
-        bars = ax.bar(x + i * width, class_f1_scores, width, 
-                      label=class_name, color=class_color, 
-                      edgecolor='black', linewidth=0.5, alpha=0.9)
     
-    ax.set_xlabel('Training Data', fontsize=14, fontweight='bold')
-    ax.set_ylabel('F1-Score', fontsize=14, fontweight='bold')
-    ax.set_xticks(x + width * (len(all_classes) - 1) / 2)
-    ax.set_xticklabels(data_labels, rotation=45, ha='right')
-    ax.set_ylim(0, 1)
-    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=12)
+    ax.set_xlabel('Synthetic data size', fontsize=14)
+    ax.set_ylabel('F1-Score difference to f1-score fromreal data', fontsize=14)
+    ax.set_xticks(np.arange(len(data_labels)))
+    ax.set_yticklabels(labels=ax.get_yticklabels(), fontsize=14)
+    ax.set_xticklabels(data_labels, rotation=0, ha='center', fontsize=14)
+    ax.legend(loc='lower right', fontsize=18)
     ax.grid(True, alpha=0.3, axis='y')
     
     # Adjust layout and save
@@ -934,10 +933,10 @@ def create_publication_comparison_figure(results_dict, save_path='figures/perfor
     print("="*60)
     
     # Print real data results first if available
-    if real_data_results:
+    if performance_results_real_data:
         print(f"\nReal Data:")
         print("  Per-Class F1-Scores:")
-        for class_name, f1_score in sorted(real_data_results['per_class_f1'].items()):
+        for class_name, f1_score in sorted(performance_results_real_data['per_class_f1'].items()):
             print(f"    {class_name}: {f1_score:.3f}")
     
     # Print synthetic data results
@@ -947,7 +946,6 @@ def create_publication_comparison_figure(results_dict, save_path='figures/perfor
         for class_name, f1_score in sorted(synthetic_results[size]['per_class_f1'].items()):
             print(f"    {class_name}: {f1_score:.3f}")
     
-    return fig
 
 def create_label_distribution_comparison(real_labels, predicted_labels, save_path='figures/label_distribution_comparison.svg'):
         """
@@ -1491,32 +1489,22 @@ def train_synthetic_data_models(X_real, y_real, force_retrain=False, force_recal
         if not force_retrain and model_exists(model_name):
             print(f"🔄 Loading existing model '{model_name}'...")
             best_model, label_encoder, classification_report_dict = load_model(model_name)
-            _, X_test, _, y_test = train_test_split(
-                X_data, y_data, test_size=0.2, random_state=42, stratify=y_data
-            )
+
         else:
             # For synthetic data, evaluate on real data (domain transfer)
             best_model, X_test, y_test, label_encoder = train_XGBoost_with_proper_split_optimized(
                 X_data, y_data, test_size=0.2, random_state=42
             )
+            y_real_encoded = label_encoder.transform(y_real)
+            y_real_pred_encoded = best_model.predict(X_real)
+            y_real_pred = label_encoder.inverse_transform(y_real_pred_encoded)
             
-            try:
-                y_real_encoded = label_encoder.transform(y_real)
-                y_real_pred_encoded = best_model.predict(X_real)
-                y_real_pred = label_encoder.inverse_transform(y_real_pred_encoded)
-                
-                eval_accuracy = accuracy_score(y_real_encoded, y_real_pred_encoded)
-                classification_report_dict = classification_report(y_real, y_real_pred, output_dict=True)
-                
-                eval_data_source = "Real Data"
-                eval_size = len(y_real)
+            eval_accuracy = accuracy_score(y_real_encoded, y_real_pred_encoded)
+            classification_report_dict = classification_report(y_real, y_real_pred, output_dict=True)
+            save_model(best_model, label_encoder, classification_report_dict, model_name)
 
-                save_model(best_model, label_encoder, classification_report_dict, model_name)
-                
-            except ValueError as e:
-                print(f"⚠️  Warning for {description}: {e}")
-                continue
-        
+
+        eval_data_source = "Real Data"
         training_time = time.time() - start_time
         
         # Store results
@@ -1534,28 +1522,16 @@ def train_synthetic_data_models(X_real, y_real, force_retrain=False, force_recal
                                 for label in classification_report_dict.keys() 
                                 if label not in ['accuracy', 'macro avg', 'weighted avg']},
             'data_size': len(y_data),
-            'train_size': len(y_data) - len(y_test) if key == "real_data" else len(y_data) - len(y_test),
-            'eval_size': eval_size,
+            'train_size': round(len(y_data)*0.8),
+            'eval_size': round(len(y_real)*0.2),
             'eval_data_source': eval_data_source,
-            'training_time': training_time
         }
         
         performance_results[key] = classification_metrics
         
         print(f"✅ {description} completed in {training_time:.2f}s")
-        print(f"   Evaluation Accuracy: {eval_accuracy:.4f}")
-        print(f"   Macro F1-Score: {classification_metrics['macro_f1']:.4f}")
-        print(f"   Macro Precision: {classification_metrics['macro_precision']:.4f}")
-        print(f"   Macro Recall: {classification_metrics['macro_recall']:.4f}")
-
-    # Print timing summary
-    total_time = sum(result['training_time'] for result in performance_results.values())
-    print(f"\n⏱️  TIMING SUMMARY:")
-    print(f"   Total training time: {total_time:.2f} seconds")
-    for key, result in performance_results.items():
-        print(f"   {key}: {result['training_time']:.2f}s")
     
-    print("\n✅ Optimized Test 1 completed successfully!")
+    print("\n✅ loaded synthetic data models successfully!")
     
     return performance_results
 
@@ -1696,9 +1672,27 @@ def main():
     print(f"Force retrain: {force_retrain}")
     print(f"Force recalculate features: {force_recalculate_features}")
     
-    real_model, X_test_real, y_test_real, label_encoder_real, classification_report_dict = get_or_train_real_data_model(
+    real_model, X_test_real, y_test_real, label_encoder_real, classification_report_dict_real_data = get_or_train_real_data_model(
         X_real, y_real, model_name="real_data_classifier", force_retrain=force_retrain
     )
+    performance_results_real_data = {
+        'macro_f1': classification_report_dict_real_data['macro avg']['f1-score'],
+        'macro_precision': classification_report_dict_real_data['macro avg']['precision'],
+        'macro_recall': classification_report_dict_real_data['macro avg']['recall'],
+        'per_class_f1': {label: classification_report_dict_real_data[label]['f1-score'] 
+                        for label in classification_report_dict_real_data.keys() 
+                        if label not in ['accuracy', 'macro avg', 'weighted avg']},
+        'per_class_precision': {label: classification_report_dict_real_data[label]['precision'] 
+                                for label in classification_report_dict_real_data.keys() 
+                                if label not in ['accuracy', 'macro avg', 'weighted avg']},
+        'per_class_recall': {label: classification_report_dict_real_data[label]['recall'] 
+                            for label in classification_report_dict_real_data.keys() 
+                            if label not in ['accuracy', 'macro avg', 'weighted avg']},
+        'data_size': len(y_real),
+        'train_size': len(y_real) - len(y_test_real),
+        'eval_size': len(y_real),
+        'eval_data_source': "Real Data",
+    }
 
     performance_results_synthetic_data_models = train_synthetic_data_models(
         X_real, 
@@ -1706,17 +1700,16 @@ def main():
         force_retrain=force_retrain, 
         force_recalculate_features=force_recalculate_features
     )
-    create_real_data_performance_figure(classification_report_dict, performance_results_synthetic_data_models, save_path='figures/real_data_performance_real_model.svg')
+
+    compare_model_with_different_synthetic_training_sizes(performance_results_synthetic_data_models, performance_results_real_data, save_path='figures/performance_comparison.png')
+
+    create_real_data_performance_figure(classification_report_dict_real_data, performance_results_synthetic_data_models, save_path='figures/real_data_performance_real_model.svg')
+    
     
     label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df, real_time_series, save_path='figures/label_distribution_comparison_with_min.svg', force_retrain=force_retrain)
 
 
-    # Create comparison figure
-    print("\n" + "="*50)
-    print("Creating publication comparison figure...")
-    print("="*50)
-    
-    fig = create_publication_comparison_figure(performance_results_synthetic_data_models, save_path='figures/performance_comparison.png')
+
     
 if __name__ == "__main__":
     main()
