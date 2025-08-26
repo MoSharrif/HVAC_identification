@@ -1790,11 +1790,19 @@ def run_test_1_optimized(X_real, y_real, save_path, force_retrain=False, force_r
         training_time = time.time() - start_time
         
         # Store results
-        f1_scores = {
+        classification_metrics = {
             'macro_f1': classification_report_dict['macro avg']['f1-score'],
+            'macro_precision': classification_report_dict['macro avg']['precision'],
+            'macro_recall': classification_report_dict['macro avg']['recall'],
             'per_class_f1': {label: classification_report_dict[label]['f1-score'] 
                             for label in classification_report_dict.keys() 
                             if label not in ['accuracy', 'macro avg', 'weighted avg']},
+            'per_class_precision': {label: classification_report_dict[label]['precision'] 
+                                    for label in classification_report_dict.keys() 
+                                    if label not in ['accuracy', 'macro avg', 'weighted avg']},
+            'per_class_recall': {label: classification_report_dict[label]['recall'] 
+                                for label in classification_report_dict.keys() 
+                                if label not in ['accuracy', 'macro avg', 'weighted avg']},
             'data_size': len(y_data),
             'train_size': len(y_data) - len(y_test) if key == "real_data" else len(y_data) - len(y_test),
             'eval_size': eval_size,
@@ -1802,11 +1810,13 @@ def run_test_1_optimized(X_real, y_real, save_path, force_retrain=False, force_r
             'training_time': training_time
         }
         
-        performance_results[key] = f1_scores
+        performance_results[key] = classification_metrics
         
         print(f"✅ {description} completed in {training_time:.2f}s")
         print(f"   Evaluation Accuracy: {eval_accuracy:.4f}")
-        print(f"   Macro F1-Score: {f1_scores['macro_f1']:.4f}")
+        print(f"   Macro F1-Score: {classification_metrics['macro_f1']:.4f}")
+        print(f"   Macro Precision: {classification_metrics['macro_precision']:.4f}")
+        print(f"   Macro Recall: {classification_metrics['macro_recall']:.4f}")
 
     # Create comparison figure
     print("\n" + "="*50)
@@ -1937,8 +1947,8 @@ def run_test_2(X_real, y_real, real_labels_df, real_time_series, save_path, forc
 def main():
     """Main function with command line argument support."""
 
-    force_retrain = True
-    force_recalculate_features = True
+    force_retrain = False
+    force_recalculate_features = False
 
     # load real data
     real_labels_df = pd.read_csv(pathlib.Path("input_data") / "fluvius_indicators.csv")

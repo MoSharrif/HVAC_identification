@@ -10,3 +10,4 @@ GEMINI.md
 *.parquet
 *.joblib
 *.pyc
+*json
