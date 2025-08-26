@@ -12,6 +12,7 @@ import seaborn as sns
 import time
 import os
 import json
+import pickle
 import argparse
 
 
@@ -43,7 +44,7 @@ def get_feature_cache_path(cache_key):
 
 def get_feature_metadata_path(cache_key):
     """Get the file path for feature metadata."""
-    return os.path.join(FEATURE_CACHE_DIR, f"{cache_key}_metadata.json")
+    return os.path.join(FEATURE_CACHE_DIR, f"{cache_key}_metadata.pkl")
 
 def feature_cache_exists(cache_key):
     """Check if cached features exist on disk."""
@@ -51,7 +52,9 @@ def feature_cache_exists(cache_key):
         return False
     feature_path = get_feature_cache_path(cache_key)
     metadata_path = get_feature_metadata_path(cache_key)
-    return os.path.exists(feature_path) and os.path.exists(metadata_path)
+    # Check for new pickle format first, then fall back to old JSON format
+    metadata_path_json = os.path.join(FEATURE_CACHE_DIR, f"{cache_key}_metadata.json")
+    return os.path.exists(feature_path) and (os.path.exists(metadata_path) or os.path.exists(metadata_path_json))
 
 def save_features_to_disk(X, y, cache_key, labels_df_shape, time_series_shape):
     """Save features to disk with metadata."""
@@ -76,8 +79,8 @@ def save_features_to_disk(X, y, cache_key, labels_df_shape, time_series_shape):
         'timestamp': time.time()
     }
     
-    with open(metadata_path, 'w') as f:
-        json.dump(metadata, f, indent=2)
+    with open(metadata_path, 'wb') as f:
+        pickle.dump(metadata, f)
     
     print(f"✅ Features saved to disk: {feature_path}")
 
@@ -93,9 +96,20 @@ def load_features_from_disk(cache_key):
         # Load features
         X, y = joblib.load(feature_path)
         
-        # Load metadata
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
+        # Load metadata - try pickle first, fall back to JSON for backwards compatibility
+        metadata_path_json = os.path.join(FEATURE_CACHE_DIR, f"{cache_key}_metadata.json")
+        if os.path.exists(metadata_path):
+            with open(metadata_path, 'rb') as f:
+                metadata = pickle.load(f)
+        elif os.path.exists(metadata_path_json):
+            with open(metadata_path_json, 'r') as f:
+                metadata = json.load(f)
+            # Optionally migrate to pickle format
+            with open(metadata_path, 'wb') as f:
+                pickle.dump(metadata, f)
+            print(f"🔄 Migrated {cache_key} metadata from JSON to pickle format")
+        else:
+            raise FileNotFoundError(f"Metadata file not found for {cache_key}")
         
         print(f"✅ Features loaded from disk: {feature_path}")
         print(f"   Features shape: {metadata['feature_shape']}")
@@ -113,8 +127,17 @@ def validate_cached_features(cache_key, labels_df, time_series):
     
     try:
         metadata_path = get_feature_metadata_path(cache_key)
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
+        metadata_path_json = os.path.join(FEATURE_CACHE_DIR, f"{cache_key}_metadata.json")
+        
+        # Try pickle first, fall back to JSON for backwards compatibility
+        if os.path.exists(metadata_path):
+            with open(metadata_path, 'rb') as f:
+                metadata = pickle.load(f)
+        elif os.path.exists(metadata_path_json):
+            with open(metadata_path_json, 'r') as f:
+                metadata = json.load(f)
+        else:
+            raise FileNotFoundError(f"Metadata file not found for {cache_key}")
         
         # Check if input data shapes match
         current_labels_shape = labels_df.shape
@@ -145,15 +168,15 @@ def save_model(model, label_encoder, classification_report_dict, model_name=DEFA
     # Define file paths
     model_path = os.path.join(MODEL_DIR, f"{model_name}_model.joblib")
     encoder_path = os.path.join(MODEL_DIR, f"{model_name}_label_encoder.joblib")
-    report_path = os.path.join(MODEL_DIR, f"{model_name}_classification_report.json")
+    report_path = os.path.join(MODEL_DIR, f"{model_name}_classification_report.pkl")
     
     # Save model and encoder using joblib
     joblib.dump(model, model_path)
     joblib.dump(label_encoder, encoder_path)
     
-    # Save classification report as JSON
-    with open(report_path, 'w') as f:
-        json.dump(classification_report_dict, f, indent=2)
+    # Save classification report as pickle
+    with open(report_path, 'wb') as f:
+        pickle.dump(classification_report_dict, f)
     
     print(f"✅ Model saved successfully:")
     print(f"   Model: {model_path}")
@@ -172,9 +195,12 @@ def model_exists(model_name=DEFAULT_MODEL_NAME):
     """
     model_path = os.path.join(MODEL_DIR, f"{model_name}_model.joblib")
     encoder_path = os.path.join(MODEL_DIR, f"{model_name}_label_encoder.joblib")
-    report_path = os.path.join(MODEL_DIR, f"{model_name}_classification_report.json")
+    report_path = os.path.join(MODEL_DIR, f"{model_name}_classification_report.pkl")
+    report_path_json = os.path.join(MODEL_DIR, f"{model_name}_classification_report.json")
     
-    return all(os.path.exists(path) for path in [model_path, encoder_path, report_path])
+    # Check if all required files exist (with backwards compatibility for JSON reports)
+    return (os.path.exists(model_path) and os.path.exists(encoder_path) and 
+            (os.path.exists(report_path) or os.path.exists(report_path_json)))
 
 def load_model(model_name=DEFAULT_MODEL_NAME):
     """
@@ -195,15 +221,26 @@ def load_model(model_name=DEFAULT_MODEL_NAME):
     # Define file paths
     model_path = os.path.join(MODEL_DIR, f"{model_name}_model.joblib")
     encoder_path = os.path.join(MODEL_DIR, f"{model_name}_label_encoder.joblib")
-    report_path = os.path.join(MODEL_DIR, f"{model_name}_classification_report.json")
+    report_path = os.path.join(MODEL_DIR, f"{model_name}_classification_report.pkl")
     
     # Load model and encoder
     model = joblib.load(model_path)
     label_encoder = joblib.load(encoder_path)
     
-    # Load classification report
-    with open(report_path, 'r') as f:
-        classification_report_dict = json.load(f)
+    # Load classification report - try pickle first, fall back to JSON for backwards compatibility
+    report_path_json = os.path.join(MODEL_DIR, f"{model_name}_classification_report.json")
+    if os.path.exists(report_path):
+        with open(report_path, 'rb') as f:
+            classification_report_dict = pickle.load(f)
+    elif os.path.exists(report_path_json):
+        with open(report_path_json, 'r') as f:
+            classification_report_dict = json.load(f)
+        # Optionally migrate to pickle format
+        with open(report_path, 'wb') as f:
+            pickle.dump(classification_report_dict, f)
+        print(f"🔄 Migrated {model_name} classification report from JSON to pickle format")
+    else:
+        raise FileNotFoundError(f"Classification report file not found for {model_name}")
     
     print(f"✅ Model loaded successfully:")
     print(f"   Model: {model_path}")
@@ -558,10 +595,16 @@ def list_cached_features():
         for key in cache_keys:
             try:
                 metadata_path = get_feature_metadata_path(key)
+                metadata_path_json = os.path.join(FEATURE_CACHE_DIR, f"{key}_metadata.json")
+                
                 if os.path.exists(metadata_path):
-                    with open(metadata_path, 'r') as f:
+                    with open(metadata_path, 'rb') as f:
+                        metadata = pickle.load(f)
+                    print(f"  - {key}: {metadata['feature_shape']} features, cached {time.ctime(metadata['timestamp'])} (pickle)")
+                elif os.path.exists(metadata_path_json):
+                    with open(metadata_path_json, 'r') as f:
                         metadata = json.load(f)
-                    print(f"  - {key}: {metadata['feature_shape']} features, cached {time.ctime(metadata['timestamp'])}")
+                    print(f"  - {key}: {metadata['feature_shape']} features, cached {time.ctime(metadata['timestamp'])} (json)")
                 else:
                     print(f"  - {key}: (metadata missing)")
             except Exception as e:
@@ -629,8 +672,17 @@ def get_cache_info(cache_key):
     
     try:
         metadata_path = get_feature_metadata_path(cache_key)
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
+        metadata_path_json = os.path.join(FEATURE_CACHE_DIR, f"{cache_key}_metadata.json")
+        
+        # Try pickle first, fall back to JSON for backwards compatibility
+        if os.path.exists(metadata_path):
+            with open(metadata_path, 'rb') as f:
+                metadata = pickle.load(f)
+        elif os.path.exists(metadata_path_json):
+            with open(metadata_path_json, 'r') as f:
+                metadata = json.load(f)
+        else:
+            raise FileNotFoundError(f"Metadata file not found for {cache_key}")
         
         feature_path = get_feature_cache_path(cache_key)
         file_size = os.path.getsize(feature_path) / (1024 * 1024)  # MB
@@ -1204,7 +1256,6 @@ def create_hourly_consumption_comparison(real_labels_df, real_time_series, synth
                 
                 # Calculate mean hourly consumption (across all days and all profiles in category)
                 hourly_mean = category_data.groupby(category_data.index.hour).mean().mean(axis=1)
-                
                 # Plot with dashed line for synthetic data
                 # Get color for this category, fallback to gray if not in mapping
                 category_color = color_dict.get(category, '#95A5A6')
@@ -1299,6 +1350,132 @@ def create_hourly_consumption_comparison(real_labels_df, real_time_series, synth
     plt.show()
     
     print(f"\n✅ Hourly consumption comparison saved to: {save_path}")
+
+
+def create_hourly_consumption_boxplot_comparison(real_labels_df, real_time_series, synthetic_labels_pred, synthetic_time_series, 
+                                               save_path='figures/hourly_consumption_boxplot_comparison.png'):
+    """
+    Create a comparison boxplot of hourly consumption distributions between real and synthetic data.
+    Shows boxplots for each hour (0-23) with data colored by category labels.
+    
+    Args:
+        real_labels_df: DataFrame with real data labels (columns: ['ID', 'Category'])
+        real_time_series: DataFrame with real time series data (8760 rows × N columns)
+        synthetic_labels_pred: Array/Series with predicted labels for synthetic data
+        synthetic_time_series: DataFrame with synthetic time series data (8760 rows × M columns)
+        save_path: Path to save the figure
+    """
+    # Ensure datetime index
+    if not isinstance(real_time_series.index, pd.DatetimeIndex):
+        real_time_series.index = pd.to_datetime(real_time_series.index)
+    if not isinstance(synthetic_time_series.index, pd.DatetimeIndex):
+        synthetic_time_series.index = pd.to_datetime(synthetic_time_series.index)
+    
+    # Class name mapping
+    class_name_mapping = {'EV_NoPV': 'EV', 'NONE': 'None', 'Only_PV': 'PV', 'PV+HP': 'PV+HP', 'EV+PV': 'EV+PV'}
+    color_dict = get_consistent_color_mapping()
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(15, 8))
+    
+    # Process real data
+    print("Processing real data...")
+    real_data_by_hour_category = {}
+    
+    # Create label mapping for real data (ID -> Category)
+    real_label_map = real_labels_df.set_index('ID')['Category'].to_dict()
+    
+    # Get hour from index and group data
+    hours = real_time_series.index.hour
+    for hour in range(24):
+        hour_mask = (hours == hour)
+        hour_data = real_time_series[hour_mask]  # All profiles for this hour across all days
+        
+        for col in hour_data.columns:
+            if col in real_label_map:
+                category = class_name_mapping.get(real_label_map[col], real_label_map[col])
+                key = (hour, category, 'real')
+                if key not in real_data_by_hour_category:
+                    real_data_by_hour_category[key] = []
+                real_data_by_hour_category[key].extend(hour_data[col].dropna().values)
+    
+    # Process synthetic data
+    print("Processing synthetic data...")
+    synthetic_data_by_hour_category = {}
+    
+    # Create label mapping for synthetic data (column index -> Category)
+    synthetic_labels_mapped = pd.Series(synthetic_labels_pred).map(class_name_mapping).fillna(pd.Series(synthetic_labels_pred))
+    
+    hours = synthetic_time_series.index.hour
+    for hour in range(24):
+        hour_mask = (hours == hour)
+        hour_data = synthetic_time_series[hour_mask]  # All profiles for this hour across all days
+        
+        for i, col in enumerate(hour_data.columns):
+            if i < len(synthetic_labels_mapped):
+                category = synthetic_labels_mapped.iloc[i]
+                key = (hour, category, 'synthetic')
+                if key not in synthetic_data_by_hour_category:
+                    synthetic_data_by_hour_category[key] = []
+                synthetic_data_by_hour_category[key].extend(hour_data[col].dropna().values)
+    
+    # Get all categories
+    all_categories = sorted(set([k[1] for k in real_data_by_hour_category.keys()] + 
+                              [k[1] for k in synthetic_data_by_hour_category.keys()]))
+    
+    # Create boxplots
+    print("Creating boxplots...")
+    box_width = 0.15
+    category_offset = {cat: i * box_width * 2 for i, cat in enumerate(all_categories)}
+    
+    for hour in range(24):
+        for category in all_categories:
+            color = color_dict.get(category, '#95A5A6')
+            
+            # Real data boxplot (filled)
+            real_key = (hour, category, 'real')
+            if real_key in real_data_by_hour_category and len(real_data_by_hour_category[real_key]) > 0:
+                position = hour + category_offset[category] - box_width/2
+                bp = ax.boxplot(real_data_by_hour_category[real_key], positions=[position], 
+                              widths=box_width, patch_artist=True,
+                              boxprops=dict(facecolor=color, alpha=0.7, edgecolor='black'),
+                              medianprops=dict(color='black', linewidth=1.5),
+                              flierprops=dict(marker='o', markersize=1, alpha=0.5))
+            
+            # Synthetic data boxplot (outlined)
+            synthetic_key = (hour, category, 'synthetic')
+            if synthetic_key in synthetic_data_by_hour_category and len(synthetic_data_by_hour_category[synthetic_key]) > 0:
+                position = hour + category_offset[category] + box_width/2
+                bp = ax.boxplot(synthetic_data_by_hour_category[synthetic_key], positions=[position], 
+                              widths=box_width, patch_artist=True,
+                              boxprops=dict(facecolor='none', alpha=1, edgecolor=color, linewidth=2),
+                              medianprops=dict(color=color, linewidth=1.5),
+                              flierprops=dict(marker='s', markersize=1, alpha=0.5, markerfacecolor=color))
+    
+    # Customize plot
+    ax.set_xlabel('Hour of Day', fontsize=14)
+    ax.set_ylabel('Consumption (kWh)', fontsize=14)
+    ax.set_xticks(range(24))
+    ax.set_xticklabels([f'{h:02d}:00' for h in range(24)], rotation=45, ha='right')
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # Create legend
+    import matplotlib.patches as mpatches
+    legend_elements = []
+    for category in all_categories:
+        color = color_dict.get(category, '#95A5A6')
+        legend_elements.append(mpatches.Rectangle((0, 0), 1, 1, facecolor=color, alpha=0.7, 
+                                                 edgecolor='black', label=f'{category} (Real)'))
+        legend_elements.append(mpatches.Rectangle((0, 0), 1, 1, facecolor='none', 
+                                                 edgecolor=color, linewidth=2, label=f'{category} (Synthetic)'))
+    
+    ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=12)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.show()
+    
+    print(f"\n✅ Hourly consumption boxplot comparison saved to: {save_path}")
 
 
 def create_real_data_classifier(X_real, y_real):
@@ -1685,6 +1862,13 @@ def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df
         y_synthetic_10000_pred, 
         synthetic_data_10000,
         save_path=save_path.replace(".svg", "_10000.svg").replace("label_distribution", "hourly_consumption")
+    )
+    create_hourly_consumption_boxplot_comparison(
+        real_labels_df, 
+        real_time_series, 
+        y_synthetic_10000_pred, 
+        synthetic_data_10000,
+        save_path=save_path.replace(".svg", "_10000_boxplot.svg").replace("label_distribution", "hourly_consumption")
     )
 
 
