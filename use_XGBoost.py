@@ -1708,7 +1708,7 @@ def calculate_all_features(force_recalculate_features=False) -> dict[str, tuple[
         force_recalculate=force_recalculate_features
     )
     
-    print("✅ All features pre-calculated and cached!")
+    print("✅ All synthetic features pre-calculated and cached!")
 
     return [
         ("1300", X_synthetic_1300, y_synthetic_1300, "Original Shape Profiles (1,300)"),
@@ -1718,7 +1718,7 @@ def calculate_all_features(force_recalculate_features=False) -> dict[str, tuple[
         ("100_000", X_synthetic_100000, y_synthetic_100000, "100,000 Profiles Per Type (100,000)"),
     ]
 
-def run_test_1_optimized(X_real, y_real, save_path, real_data_model_info=None, force_recalculate_features=False):
+def run_test_1_optimized(X_real, y_real, save_path, force_retrain=False, force_recalculate_features=False):
     """
     Optimized version of run_test_1 with performance improvements:
     - Uses cached feature calculations
@@ -1730,7 +1730,7 @@ def run_test_1_optimized(X_real, y_real, save_path, real_data_model_info=None, f
         X_real: Real data features
         y_real: Real data labels
         save_path: Path to save the comparison figure
-        real_data_model_info: Optional tuple of (model, X_test, y_test, label_encoder) from pre-training
+        force_retrain: If True, retrain even if saved model exists
     """
     print("🚀 OPTIMIZED PERFORMANCE TEST 1")
     print("="*50)
@@ -1756,26 +1756,14 @@ def run_test_1_optimized(X_real, y_real, save_path, real_data_model_info=None, f
         
         start_time = time.time()
         
-        if key == "real_data":
-            # For real data, use pre-trained model if available or train new one
-            if real_data_model_info is not None:
-                print("  ♻️  Using pre-trained real data model...")
-                best_model, X_test, y_test, label_encoder = real_data_model_info
-            else:
-                print("  🔄 Training new real data model...")
-                best_model, X_test, y_test, label_encoder = train_XGBoost_with_proper_split_optimized(
-                    X_data, y_data, test_size=0.2, random_state=42
-                )
-            
-            y_test_pred_encoded = best_model.predict(X_test)
-            y_test_pred = label_encoder.inverse_transform(y_test_pred_encoded)
-            
-            eval_accuracy = accuracy_score(y_test, y_test_pred)
-            classification_report_dict = classification_report(y_test, y_test_pred, output_dict=True)
-            
-            eval_data_source = "Real Test Set"
-            eval_size = len(y_test)
-            
+        model_name = f"synthetic_{key}_classifier"
+
+        if not force_retrain and model_exists(model_name):
+            print(f"🔄 Loading existing model '{model_name}'...")
+            best_model, label_encoder, classification_report_dict = load_model(model_name)
+            _, X_test, _, y_test = train_test_split(
+                X_data, y_data, test_size=0.2, random_state=42, stratify=y_data
+            )
         else:
             # For synthetic data, evaluate on real data (domain transfer)
             best_model, X_test, y_test, label_encoder = train_XGBoost_with_proper_split_optimized(
@@ -1792,6 +1780,8 @@ def run_test_1_optimized(X_real, y_real, save_path, real_data_model_info=None, f
                 
                 eval_data_source = "Real Data"
                 eval_size = len(y_real)
+
+                save_model(best_model, label_encoder, classification_report_dict, model_name)
                 
             except ValueError as e:
                 print(f"⚠️  Warning for {description}: {e}")
@@ -1840,8 +1830,9 @@ def run_test_1_optimized(X_real, y_real, save_path, real_data_model_info=None, f
     
     return performance_results
 
-def run_test_2(X_real, y_real, real_labels_df, real_time_series, save_path, real_data_model_info=None):
-      # ==============================================================================
+
+def run_test_2(X_real, y_real, real_labels_df, real_time_series, save_path, force_retrain=False):
+    # ==============================================================================
     # SECOND STUDY: Train on Real Data, Label Synthetic Data, Compare Distributions
     # ==============================================================================
     
@@ -1850,32 +1841,42 @@ def run_test_2(X_real, y_real, real_labels_df, real_time_series, save_path, real
     print("Training XGBoost on Real Data → Labeling Synthetic Profiles")
     print("="*70)
     
-    # Step 1: Train XGBoost model on ALL real data - REUSE CACHED FEATURES AND EXISTING MODEL
-    print("\n🎯 Step 1: Training XGBoost on ALL real data...")
-    
-    # OPTIMIZATION: Reuse the real data features we already calculated
-    print(f"Real data training set:")
-    print(f"  Total samples: {len(y_real)}")
-    print(f"  Class distribution: {pd.Series(y_real).value_counts().to_dict()}")
-    
-    # OPTIMIZATION: Train on ALL real data (not just 80%)
-    label_encoder_real_full = LabelEncoder()
-    y_real_encoded_full = label_encoder_real_full.fit_transform(y_real)
-    
-    # Train XGBoost on all real data
-    xgb_real_model = XGBClassifier(
-        objective='multi:softmax',
-        num_class=len(np.unique(y_real_encoded_full)),
-        eval_metric='mlogloss', 
-        random_state=42
-    )
-    xgb_real_model.fit(X_real, y_real_encoded_full)
-    
-    # Save the model trained on real data
-    joblib.dump(xgb_real_model, 'XGB_realData.joblib')
-    joblib.dump(label_encoder_real_full, 'xgb_label_encoder_realData.joblib')
-    print("✅ Model trained on real data saved as 'XGB_realData.joblib'")
-    
+    model_name = "real_data_full_classifier"
+
+    if not force_retrain and model_exists(model_name):
+        print(f"🔄 Loading existing model '{model_name}'...")
+        xgb_real_model, label_encoder_real_full, _ = load_model(model_name)
+    else:
+        # Step 1: Train XGBoost model on ALL real data - REUSE CACHED FEATURES AND EXISTING MODEL
+        print("\n🎯 Step 1: Training XGBoost on ALL real data...")
+        
+        # OPTIMIZATION: Reuse the real data features we already calculated
+        print(f"Real data training set:")
+        print(f"  Total samples: {len(y_real)}")
+        print(f"  Class distribution: {pd.Series(y_real).value_counts().to_dict()}")
+        
+        # OPTIMIZATION: Train on ALL real data (not just 80%)
+        label_encoder_real_full = LabelEncoder()
+        y_real_encoded_full = label_encoder_real_full.fit_transform(y_real)
+        
+        # Train XGBoost on all real data
+        xgb_real_model = XGBClassifier(
+            objective='multi:softmax',
+            num_class=len(np.unique(y_real_encoded_full)),
+            eval_metric='mlogloss', 
+            random_state=42
+        )
+        xgb_real_model.fit(X_real, y_real_encoded_full)
+        
+        # Create a classification report on the training data
+        y_real_pred_encoded = xgb_real_model.predict(X_real)
+        y_real_pred = label_encoder_real_full.inverse_transform(y_real_pred_encoded)
+        classification_report_dict = classification_report(y_real, y_real_pred, output_dict=True)
+        
+        # Save the model trained on real data
+        save_model(xgb_real_model, label_encoder_real_full, classification_report_dict, model_name)
+        print(f"✅ Model trained on real data saved as '{model_name}'")
+
     # Step 2: Load large synthetic dataset and predict labels
     print("\n🎯 Step 2: Loading large synthetic dataset and predicting labels...")
     
@@ -1892,7 +1893,7 @@ def run_test_2(X_real, y_real, real_labels_df, real_time_series, save_path, real
         'ID': range(1, synthetic_timeSeries_large.shape[1] + 1),
         'Category': ['NONE'] * synthetic_timeSeries_large.shape[1]  # Dummy category, will be ignored
     })
-    X_synthetic_large, _ = calculate_features_optimized(dummy_labels_df, synthetic_timeSeries_large)
+    X_synthetic_large, _ = calculate_features_cached(dummy_labels_df, synthetic_timeSeries_large, cache_key="synthetic_large_unlabeled", force_recalculate=force_retrain)
     
     # Predict labels using the real-data-trained model
     y_synthetic_pred_encoded = xgb_real_model.predict(X_synthetic_large)
@@ -1910,7 +1911,7 @@ def run_test_2(X_real, y_real, real_labels_df, real_time_series, save_path, real
         save_path=save_path
     )
     
-    print(f"\n✅ Label distribution comparison saved to: figures/label_distribution_comparison.png")
+    print(f"\n✅ Label distribution comparison saved to: {save_path}")
     
     # Step 4: Create hourly consumption comparison
     print("\n🎯 Step 4: Creating hourly consumption pattern comparison...")
@@ -1921,7 +1922,7 @@ def run_test_2(X_real, y_real, real_labels_df, real_time_series, save_path, real
         real_time_series, 
         y_synthetic_pred, 
         synthetic_timeSeries_large,
-        save_path=save_path
+        save_path=save_path.replace("label_distribution", "hourly_consumption")
     )
     
     print("\n" + "="*70)
@@ -1929,6 +1930,7 @@ def run_test_2(X_real, y_real, real_labels_df, real_time_series, save_path, real
     print("Domain transfer analysis: Real → Synthetic labeling finished.")
     print("Note: Using unlabeled synthetic data - only distribution comparison available.")
     print("="*70)
+
 
 
 
@@ -1969,17 +1971,14 @@ def main():
     real_model, X_test_real, y_test_real, label_encoder_real, classification_report_dict = get_or_train_real_data_model(
         X_real, y_real, model_name="real_data_classifier", force_retrain=force_retrain
     )
+
     create_real_data_performance_figure(classification_report_dict, save_path='figures/real_data_performance_real_model.svg')
     
-    # Package the real data model info for reuse
-    real_data_model_info = (real_model, X_test_real, y_test_real, label_encoder_real)
-    
     performance_results_test_1 = run_test_1_optimized(
-        X_real, y_real, save_path='figures/xgboost_performance_comparison_optimized_100000.svg', real_data_model_info=real_data_model_info, force_recalculate_features=force_recalculate_features
+        X_real, y_real, save_path='figures/xgboost_performance_comparison_optimized_100000.svg', force_retrain=force_retrain, force_recalculate_features=force_recalculate_features
     )
 
-    performance_results_test_1["100_000"]["macro_f1"]
-    run_test_2(X_real, y_real, real_labels_df, real_time_series, save_path='figures/label_distribution_comparison_with_min.svg', real_data_model_info=real_data_model_info)
+    run_test_2(X_real, y_real, real_labels_df, real_time_series, save_path='figures/label_distribution_comparison_with_min.svg', force_retrain=force_retrain)
 
 if __name__ == "__main__":
     main()
