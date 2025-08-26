@@ -23,7 +23,7 @@ DEFAULT_MODEL_NAME = "xgboost_classifier"
 
 # Feature caching system for performance optimization
 FEATURE_CACHE_DIR = "feature_cache"
-_feature_cache = {}  # In-memory cache for current session
+
 
 def ensure_model_directory():
     """Ensure the model directory exists."""
@@ -517,10 +517,9 @@ def calculate_features_cached(labels_df, time_series, cache_key=None, force_reca
     """
     Cached version of feature calculation with disk persistence to avoid redundant computations.
     
-    This function implements a three-tier caching strategy:
-    1. In-memory cache for current session
-    2. Disk cache for persistence across sessions
-    3. Validation to ensure data integrity
+    This function implements a disk caching strategy:
+    1. Disk cache for persistence across sessions
+    2. Validation to ensure data integrity
     
     Args:
         labels_df: DataFrame containing labels
@@ -535,20 +534,13 @@ def calculate_features_cached(labels_df, time_series, cache_key=None, force_reca
         print("No cache key provided, calculating features without caching")
         return calculate_features_optimized(labels_df, time_series)
     
-    # Check in-memory cache first (fastest)
-    if not force_recalculate and cache_key in _feature_cache:
-        print(f"📋 Using in-memory cached features for {cache_key}")
-        return _feature_cache[cache_key]
-    
-    # Check disk cache second (fast)
+    # Check disk cache (fast)
     if not force_recalculate and feature_cache_exists(cache_key):
         # Validate that cached features match current input data
         if validate_cached_features(cache_key, labels_df, time_series):
             result = load_features_from_disk(cache_key)
             if result is not None:
                 X, y, metadata = result
-                # Store in memory cache for this session
-                _feature_cache[cache_key] = (X, y)
                 print(f"💾 Loaded features from disk cache for {cache_key}")
                 return X, y
         else:
@@ -566,27 +558,13 @@ def calculate_features_cached(labels_df, time_series, cache_key=None, force_reca
     
     print(f"✅ Feature calculation completed in {calculation_time:.2f} seconds")
     
-    # Save to both memory and disk cache
-    _feature_cache[cache_key] = (X, y)
+    # Save to disk cache
     save_features_to_disk(X, y, cache_key, list(labels_df.shape), list(time_series.shape))
     
-    print(f"🗃️ Features cached in memory and disk for {cache_key}")
+    print(f"🗃️ Features cached to disk for {cache_key}")
     
     return X, y
 
-def clear_feature_cache(clear_disk_cache=False):
-    """
-    Clear the feature cache to free memory.
-    
-    Args:
-        clear_disk_cache: If True, also clear disk cache files
-    """
-    global _feature_cache
-    _feature_cache.clear()
-    print("🧹 In-memory feature cache cleared")
-    
-    if clear_disk_cache:
-        clear_disk_feature_cache()
 
 def clear_disk_feature_cache():
     """Clear all cached features from disk."""
@@ -630,16 +608,15 @@ def list_cached_features():
 
 def demo_feature_caching():
     """
-    Demonstration function showing the enhanced feature caching capabilities.
+    Demonstration function showing the feature caching capabilities.
     """
     print("\n" + "="*70)
-    print("ENHANCED FEATURE CACHING DEMO")
+    print("FEATURE CACHING DEMO")
     print("="*70)
     
     print("\n1. Feature Caching System Overview:")
-    print("   • Three-tier caching: Memory → Disk → Recalculation")
+    print("   • Disk caching for persistence across script runs")
     print("   • Automatic data validation and cache invalidation")
-    print("   • Persistent storage across script runs")
     print("   • Significant time savings for large datasets")
     
     print("\n2. Available cached features:")
@@ -660,17 +637,14 @@ def demo_feature_caching():
     print("   # Get cache info:")
     print("   get_cache_info('my_dataset')")
     print()
-    print("   # Clear memory cache only:")
-    print("   clear_feature_cache()")
-    print()
-    print("   # Clear both memory and disk cache:")
-    print("   clear_feature_cache(clear_disk_cache=True)")
+    print("   # Clear disk cache:")
+    print("   clear_disk_feature_cache()")
     
     print("\n5. Command Line Usage:")
     print("   python use_XGBoost.py                           # Use cached features")
     print("   python use_XGBoost.py --force-recalculate-features  # Force recalculation")
     print("   python use_XGBoost.py --list-cached-features    # List all cached features") 
-    print("   python use_XGBoost.py --clear-feature-cache     # Clear all cached features")
+    print("   python use_XGBoost.py --clear-feature-cache     # Clear all cached features from disk")
     print("   python use_XGBoost.py --cache-info real_data    # Get info about specific cache")
     
     print("\n6. Performance Benefits:")
@@ -680,6 +654,7 @@ def demo_feature_caching():
     print("   • Automatic validation ensures data integrity")
     
     print("="*70)
+
 
 def get_cache_info(cache_key):
     """Get detailed information about a cached feature set."""
@@ -1835,7 +1810,6 @@ def run_test_1_optimized(X_real, y_real, save_path, force_retrain=False, force_r
     for key, result in performance_results.items():
         print(f"   {key}: {result['training_time']:.2f}s")
     
-    clear_feature_cache()  # Free memory
     print("\n✅ Optimized Test 1 completed successfully!")
     
     return performance_results
