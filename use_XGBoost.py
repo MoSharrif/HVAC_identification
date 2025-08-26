@@ -371,54 +371,6 @@ def train_XGBoost_with_proper_split_optimized(X, y, test_size=0.2, random_state=
     print(f"Training completed successfully!")
     return best_xgb_model, X_test, y_test, label_encoder
 
-def train_XGBoost(X, y):
-    # Encode labels to integers
-    label_encoder = LabelEncoder()
-    y_encoded = label_encoder.fit_transform(y)
-    
-    print(f"Number of classes: {len(np.unique(y_encoded))}")
-    print(f"Encoded class distribution: {pd.Series(y_encoded).value_counts().to_dict()}")
-
-    # Initialize K-Fold Cross-Validation
-    kf = KFold(n_splits=5, shuffle=True, random_state=42)
-    best_accuracy = 0
-    best_xgb_model = None
-
-    # K-Fold Cross-Validation
-    for fold, (train_index, test_index) in enumerate(kf.split(X)):
-        # Split data into training and validation sets for this fold
-        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
-        y_train, y_test = y_encoded[train_index], y_encoded[test_index]  
-        
-        # Check class distribution in this fold
-        unique_train_classes = len(np.unique(y_train))
-        if unique_train_classes < 2:
-            print(f"Warning: Fold {fold + 1} has only {unique_train_classes} class(es)")
-            continue
-        
-        # Train the XGBoost model
-        xgb_model = XGBClassifier(
-            objective='multi:softmax',
-            num_class=len(np.unique(y_encoded)),
-            eval_metric='mlogloss', 
-            random_state=42
-        )
-        xgb_model.fit(X_train, y_train) 
-        
-        # Make predictions and calculate accuracy
-        y_pred = xgb_model.predict(X_test)
-        fold_accuracy = accuracy_score(y_test, y_pred)
-        
-        # Check if this is the best model so far
-        if fold_accuracy > best_accuracy:
-            best_accuracy = fold_accuracy
-            best_xgb_model = xgb_model
-
-        print(f"Fold {fold + 1} Accuracy: {fold_accuracy:.2f}")
-
-
-    print(f"Best Fold Accuracy: {best_accuracy:.2f}")
-    return best_xgb_model
 
 def calculate_features_optimized(labels_df, time_series):
     """
@@ -800,199 +752,6 @@ def create_labels_for_100_000_labels_df():
     labels_df = pd.DataFrame({"Category": flat_list, "ID": np.arange(1, 500_001)})
     return labels_df
 
-def run_multiple_experiments(labels_df, synthetic_timeSeries, n_experiments=5, test_size=0.2):
-    """
-    Run multiple experiments with different random seeds to assess variability.
-    
-    Args:
-        labels_df: DataFrame containing labels
-        synthetic_timeSeries: Time series data
-        n_experiments: Number of experiments to run with different seeds
-        test_size: Proportion of data to use for testing
-    
-    Returns:
-        results: Dictionary containing statistics across experiments
-    """
-    macro_f1_scores = []
-    per_class_f1_scores = {}
-    
-    print(f"🔬 Running {n_experiments} experiments with different random seeds...")
-    
-    for i in range(n_experiments):
-        random_state = 42 + i  # Different seed for each experiment
-        print(f"  Experiment {i+1}/{n_experiments} (seed={random_state})")
-        
-        try:
-            _, f1_scores, _, _, _, _ = create_classification_report_proper_split(
-                labels_df, synthetic_timeSeries, test_size=test_size, random_state=random_state
-            )
-            
-            macro_f1_scores.append(f1_scores['macro_f1'])
-            
-            # Collect per-class F1 scores
-            for class_name, f1_score in f1_scores['per_class_f1'].items():
-                if class_name not in per_class_f1_scores:
-                    per_class_f1_scores[class_name] = []
-                per_class_f1_scores[class_name].append(f1_score)
-        
-        except Exception as e:
-            print(f"    ⚠️  Experiment {i+1} failed: {e}")
-            continue
-    
-    # Calculate statistics
-    results = {
-        'macro_f1_mean': np.mean(macro_f1_scores),
-        'macro_f1_std': np.std(macro_f1_scores),
-        'macro_f1_min': np.min(macro_f1_scores),
-        'macro_f1_max': np.max(macro_f1_scores),
-        'per_class_f1_mean': {class_name: np.mean(scores) for class_name, scores in per_class_f1_scores.items()},
-        'per_class_f1_std': {class_name: np.std(scores) for class_name, scores in per_class_f1_scores.items()},
-        'data_size': f1_scores['data_size'] if macro_f1_scores else 0,
-        'n_successful_experiments': len(macro_f1_scores)
-    }
-    
-    print(f"  📊 Macro F1-Score: {results['macro_f1_mean']:.3f} ± {results['macro_f1_std']:.3f}")
-    print(f"     Range: [{results['macro_f1_min']:.3f}, {results['macro_f1_max']:.3f}]")
-    
-    return results
-
-def create_classification_report_proper_split(labels_df, synthetic_timeSeries, test_size=0.2, random_state=42, 
-                                           real_eval_labels_df=None, real_eval_timeSeries=None):
-    """
-    Create classification report with proper train/test split evaluation.
-    
-    Args:
-        labels_df: DataFrame containing synthetic labels for training
-        synthetic_timeSeries: Synthetic time series data for training
-        test_size: Proportion of synthetic data to use for model selection (not final evaluation)
-        random_state: Random state for reproducibility
-        real_eval_labels_df: Optional DataFrame containing real labels for final evaluation
-        real_eval_timeSeries: Optional real time series data for final evaluation
-    
-    Returns:
-        classification_report_df: Classification report as DataFrame
-        f1_scores: Dictionary containing F1-scores
-        best_xgb_model: The trained model
-        X_eval: Evaluation features (synthetic test or real data)
-        y_eval: Evaluation labels (synthetic test or real data)
-        y_pred: Predictions on evaluation set
-    """
-    # Step 1: Calculate features
-    X, y = calculate_features_optimized(labels_df, synthetic_timeSeries)
-    
-    # Step 2: Train model with proper train/test split
-    best_xgb_model, X_test, y_test, label_encoder = train_XGBoost_with_proper_split_optimized(
-        X, y, test_size=test_size, random_state=random_state
-    )
-    
-    # Step 3: Choose evaluation dataset
-    if real_eval_labels_df is not None and real_eval_timeSeries is not None:
-        # Use real data for evaluation (domain transfer evaluation)
-        print(f"\n🎯 REAL DATA EVALUATION (Domain Transfer):")
-        print(f"Training on synthetic data, evaluating on real data")
-        
-        # Calculate features for real data
-        X_eval, y_eval = calculate_features_optimized(real_eval_labels_df, real_eval_timeSeries)
-        eval_data_source = "Real Data"
-        train_size = len(y) - len(y_test)
-        eval_size = len(y_eval)
-    else:
-        # Use synthetic test set for evaluation
-        print(f"\n🎯 SYNTHETIC TEST SET EVALUATION:")
-        X_eval, y_eval = X_test, y_test
-        eval_data_source = "Synthetic Test Set"
-        train_size = len(y) - len(y_test)
-        eval_size = len(y_test)
-    
-    # Step 4: Make predictions on evaluation set
-    # Check if all evaluation labels exist in training label encoder
-    try:
-        y_eval_encoded = label_encoder.transform(y_eval)
-    except ValueError as e:
-        print(f"⚠️  Warning: Some evaluation labels not seen during training: {e}")
-        # Filter evaluation data to only include classes seen during training
-        known_classes = set(label_encoder.classes_)
-        eval_mask = y_eval.isin(known_classes)
-        X_eval = X_eval[eval_mask]
-        y_eval = y_eval[eval_mask].reset_index(drop=True)
-        y_eval_encoded = label_encoder.transform(y_eval)
-        print(f"   Filtered to {len(y_eval)} samples with known classes")
-    
-    y_pred_encoded = best_xgb_model.predict(X_eval)
-    
-    # Step 5: Calculate evaluation accuracy
-    eval_accuracy = accuracy_score(y_eval_encoded, y_pred_encoded)
-    print(f"{eval_data_source} Accuracy: {eval_accuracy:.4f}")
-    
-    # Step 6: Convert predictions back to original labels for meaningful output
-    y_pred = label_encoder.inverse_transform(y_pred_encoded)
-    
-    # Step 7: Detailed classification report on evaluation set
-    classification_report_dict = classification_report(y_eval, y_pred, output_dict=True)
-    classification_report_df = pd.DataFrame(classification_report_dict).transpose()
-    
-    # Step 8: Extract F1-scores for comparison
-    f1_scores = {
-        'macro_f1': classification_report_dict['macro avg']['f1-score'],
-        'per_class_f1': {label: classification_report_dict[label]['f1-score'] 
-                        for label in classification_report_dict.keys() 
-                        if label not in ['accuracy', 'macro avg', 'weighted avg']},
-        'data_size': len(y),
-        'train_size': train_size,
-        'eval_size': eval_size,
-        'eval_data_source': eval_data_source
-    }
-    
-    print(f"{eval_data_source} Macro F1-Score: {f1_scores['macro_f1']:.4f}")
-    print(f"{eval_data_source} Per-Class F1-Scores:")
-    for class_name, f1_score in f1_scores['per_class_f1'].items():
-        print(f"  {class_name}: {f1_score:.4f}")
-    
-    return classification_report_df, f1_scores, best_xgb_model, X_eval, y_eval, y_pred
-
-def create_classification_report(labels_df, synthetic_timeSeries, best_xgb_model=None):
-    """
-    ⚠️  DEPRECATED: This function evaluates on training data (data leakage).
-    Use create_classification_report_proper_split() instead for accurate F1-scores.
-    """
-    if best_xgb_model is None:
-        X, y = calculate_features_optimized(labels_df, synthetic_timeSeries)
-        best_xgb_model = train_XGBoost(X, y)
-        # Save the best model
-        joblib.dump(best_xgb_model, 'best_xgb_model.joblib')
-    else:
-        best_xgb_model = joblib.load('best_xgb_model.joblib')
-        print("loaded best_xgb_model.joblib")
-        X, y = calculate_features_optimized(labels_df, synthetic_timeSeries)
-
-    # Encode y to match the model's expectations (same encoding as used in training)
-    label_encoder = LabelEncoder()
-    y_encoded = label_encoder.fit_transform(y)
-    
-    # Step 1: Make predictions using the best model
-    y_pred = best_xgb_model.predict(X)
-
-    # Step 2: Calculate overall accuracy
-    overall_accuracy = accuracy_score(y_encoded, y_pred)
-    print(f"Overall Accuracy: {overall_accuracy:.2f}")
-
-    # Step 3: Detailed classification report for per-label accuracy (precision, recall, F1-score for each label)
-    # Convert predictions back to original labels for meaningful output
-    y_pred_labels = label_encoder.inverse_transform(y_pred)
-    classification_report_dict = classification_report(y, y_pred_labels, output_dict=True)
-    classification_report_df = pd.DataFrame(classification_report_dict).transpose()
-    
-    # Extract F1-scores for comparison
-    f1_scores = {
-        'macro_f1': classification_report_dict['macro avg']['f1-score'],
-        'per_class_f1': {label: classification_report_dict[label]['f1-score'] 
-                        for label in classification_report_dict.keys() 
-                        if label not in ['accuracy', 'macro avg', 'weighted avg']},
-        'data_size': len(y)
-    }
-    
-    return classification_report_df, f1_scores
-
 
 def plot_recall(classification_report_df, title: str):
     # Plot per-label accuracy (recall)
@@ -1066,7 +825,7 @@ def create_labels_for_5000_synthetic_profiles_per_type():
     labels_df = pd.DataFrame({"Category": flat_list, "ID": np.arange(1, 25001)})
     return labels_df
 
-def create_publication_comparison_figure(results_dict, save_path='performance_comparison.png'):
+def create_publication_comparison_figure(results_dict, save_path='figures/performance_comparison.png'):
     """
     Create a publication-quality figure showing per-class XGBoost performance across different training data sizes.
     
@@ -1642,7 +1401,7 @@ def create_real_data_performance_figure(classification_report_dict, save_path='f
     plt.show()
 
 
-def calculate_all_features(force_recalculate_features=False) -> dict[str, tuple[pd.DataFrame, pd.Series]]:
+def calculate_all_synthetic_features(force_recalculate_features=False) -> dict[str, tuple[pd.DataFrame, pd.Series]]:
     # Original shape (1,300 profiles) - cached
     labels_df_1300 = create_labels_for_original_shape_synthetic_profiles()
     synthetic_timeSeries_1300 = load_synthetic_profiles_in_originial_shape()
@@ -1687,13 +1446,13 @@ def calculate_all_features(force_recalculate_features=False) -> dict[str, tuple[
 
     return [
         ("1300", X_synthetic_1300, y_synthetic_1300, "Original Shape Profiles (1,300)"),
-        ("4000", X_synthetic_5000, y_synthetic_5000, "1000 Profiles Per Type (5,000)"),
-        ("25000", X_synthetic_25000, y_synthetic_25000, "5000 Profiles Per Type (25,000)"),
-        ("50_000", X_synthetic_50000, y_synthetic_50000, "50,000 Profiles Per Type (50,000)"),
-        ("100_000", X_synthetic_100000, y_synthetic_100000, "100,000 Profiles Per Type (100,000)"),
+        ("4000", X_synthetic_5000, y_synthetic_5000, "1000 Profiles Per Type"),
+        ("25000", X_synthetic_25000, y_synthetic_25000, "5000 Profiles Per Type"),
+        ("50000", X_synthetic_50000, y_synthetic_50000, "50,000 Profiles Per Type"),
+        ("100000", X_synthetic_100000, y_synthetic_100000, "100,000 Profiles Per Type"),
     ]
 
-def run_test_1_optimized(X_real, y_real, save_path, force_retrain=False, force_recalculate_features=False):
+def train_synthetic_data_models(X_real, y_real, force_retrain=False, force_recalculate_features=False):
     """
     Optimized version of run_test_1 with performance improvements:
     - Uses cached feature calculations
@@ -1713,17 +1472,13 @@ def run_test_1_optimized(X_real, y_real, save_path, force_retrain=False, force_r
     # Pre-calculate all features with caching
     print("📊 Pre-calculating all features with caching...")
     
-    
-
     # Dictionary to store results for comparison
     performance_results = {}
 
     print("🎯 Using optimized 80/20 train/test split with evaluation on held-out test set")
 
-    # Training experiments with timing
-    experiments = calculate_all_features(force_recalculate_features=force_recalculate_features)
+    experiments = calculate_all_synthetic_features(force_recalculate_features=force_recalculate_features)
 
-    
     for key, X_data, y_data, description in experiments:
         print(f"\n{'='*50}")
         print(f"Training on {description}...")
@@ -1793,16 +1548,6 @@ def run_test_1_optimized(X_real, y_real, save_path, force_retrain=False, force_r
         print(f"   Macro Precision: {classification_metrics['macro_precision']:.4f}")
         print(f"   Macro Recall: {classification_metrics['macro_recall']:.4f}")
 
-    # Create comparison figure
-    print("\n" + "="*50)
-    print("Creating publication comparison figure...")
-    print("="*50)
-    
-    fig = create_publication_comparison_figure(
-        performance_results, 
-        save_path=save_path
-    )
-    
     # Print timing summary
     total_time = sum(result['training_time'] for result in performance_results.values())
     print(f"\n⏱️  TIMING SUMMARY:")
@@ -1958,12 +1703,23 @@ def main():
 
     create_real_data_performance_figure(classification_report_dict, save_path='figures/real_data_performance_real_model.svg')
     
-    performance_results_test_1 = run_test_1_optimized(
-        X_real, y_real, save_path='figures/xgboost_performance_comparison_optimized_100000.svg', force_retrain=force_retrain, force_recalculate_features=force_recalculate_features
+    performance_results_synthetic_data_models = train_synthetic_data_models(
+        X_real, 
+        y_real, 
+        force_retrain=force_retrain, 
+        force_recalculate_features=force_recalculate_features
     )
 
     run_test_2(X_real, y_real, real_labels_df, real_time_series, save_path='figures/label_distribution_comparison_with_min.svg', force_retrain=force_retrain)
 
+
+    # Create comparison figure
+    print("\n" + "="*50)
+    print("Creating publication comparison figure...")
+    print("="*50)
+    
+    fig = create_publication_comparison_figure(performance_results_synthetic_data_models, save_path='figures/performance_comparison.png')
+    
 if __name__ == "__main__":
     main()
   
