@@ -1054,7 +1054,6 @@ def create_label_distribution_comparison(real_labels, predicted_labels, save_pat
         print(f"  Max Difference: {differences.max():.1f}% ({all_categories[differences.argmax()]})")
         print(f"  Min Difference: {differences.min():.1f}% ({all_categories[differences.argmin()]})")
         
-        return fig, real_percentages, pred_percentages, differences
 
 def create_hourly_consumption_comparison(real_labels_df, real_time_series, synthetic_labels_pred, synthetic_time_series, 
                                        save_path='figures/hourly_consumption_comparison.png'):
@@ -1371,14 +1370,13 @@ def create_real_data_performance_figure(classification_report_dict_real_data, cl
                         color='#C73E1D', alpha=0.8, edgecolor='black', linewidth=0.5)
     
     # Customize the plot
-    ax.set_xlabel('Category', fontsize=14, fontweight='bold')
-    ax.set_ylabel('Score', fontsize=14, fontweight='bold')
-    ax.set_title('XGBoost Performance on Real Data\n(F1-Score, Precision, Recall)', 
-                 fontsize=16, fontweight='bold', pad=20)
+    ax.set_xlabel('Category', fontsize=14)
+    ax.set_ylabel('Score', fontsize=14)
     ax.set_xticks(x)
-    ax.set_xticklabels(classes, rotation=45, ha='right')
-    ax.set_ylim(0, 1.1)
-    ax.legend(fontsize=12)
+    ax.set_xticklabels(classes, rotation=0, ha='center', fontsize=14)
+    ax.set_yticklabels(labels=ax.get_yticklabels(), fontsize=14)
+    ax.set_ylim(0, 1)
+    ax.legend(fontsize=14)
     ax.grid(True, alpha=0.3, axis='y')
     
     # Add value labels on bars
@@ -1605,17 +1603,31 @@ def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df
     
     print(f"Predicted label distribution: {pd.Series(y_synthetic_pred).value_counts().to_dict()}")
     
+    # create the same for the labelled synthetic data to see if there is a big difference
+    labeled_synthetic_data = load_synthetic_profiles_in_originial_shape()
+    synthetic_labels = create_labels_for_original_shape_synthetic_profiles()
+    X_synthetic_labeled, _ = calculate_features_cached(synthetic_labels, labeled_synthetic_data, cache_key="synthetic_labeled", force_recalculate=force_retrain)
+    y_synthetic_labeled_pred_encoded = xgb_real_model.predict(X_synthetic_labeled)
+    y_synthetic_labeled_pred = label_encoder_real_full.inverse_transform(y_synthetic_labeled_pred_encoded)
+    print(f"Predicted label distribution: {pd.Series(y_synthetic_labeled_pred).value_counts().to_dict()}")
+    
     # Step 3: Create comparison visualization
     print("\n🎯 Step 3: Creating label distribution comparison...")
     
     # Create the comparison figure
-    fig, real_percentages, pred_percentages, differences = create_label_distribution_comparison(
+    create_label_distribution_comparison(
         real_labels_df['Category'], 
         y_synthetic_pred,
         save_path=save_path
     )
-    
     print(f"\n✅ Label distribution comparison saved to: {save_path}")
+    create_label_distribution_comparison(
+        real_labels_df['Category'], 
+        y_synthetic_labeled_pred,
+        save_path="figures/label_distribution_comparison_labeled.svg"
+    )
+    
+    print(f"\n✅ Label distribution comparison of labeled synthetic data saved to: figures/label_distribution_comparison_labeled.svg")
     
     # Step 4: Create hourly consumption comparison
     print("\n🎯 Step 4: Creating hourly consumption pattern comparison...")
@@ -1629,11 +1641,15 @@ def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df
         save_path=save_path.replace("label_distribution", "hourly_consumption")
     )
     
-    print("\n" + "="*70)
-    print("✅ SECOND STUDY COMPLETED!")
-    print("Domain transfer analysis: Real → Synthetic labeling finished.")
-    print("Note: Using unlabeled synthetic data - only distribution comparison available.")
-    print("="*70)
+
+    create_hourly_consumption_comparison(
+        real_labels_df, 
+        real_time_series, 
+        y_synthetic_labeled_pred, 
+        labeled_synthetic_data,
+        save_path="figures/hourly_consumption_comparison_labeled.svg"
+    )
+
 
 
 
