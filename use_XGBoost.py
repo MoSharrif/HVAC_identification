@@ -40,7 +40,7 @@ def ensure_feature_cache_directory():
 
 def get_feature_cache_path(cache_key):
     """Get the file path for cached features."""
-    return os.path.join(FEATURE_CACHE_DIR, f"{cache_key}_features.joblib")
+    return os.path.join(FEATURE_CACHE_DIR, f"{cache_key}_features.pkl")
 
 def get_feature_metadata_path(cache_key):
     """Get the file path for feature metadata."""
@@ -54,7 +54,11 @@ def feature_cache_exists(cache_key):
     metadata_path = get_feature_metadata_path(cache_key)
     # Check for new pickle format first, then fall back to old JSON format
     metadata_path_json = os.path.join(FEATURE_CACHE_DIR, f"{cache_key}_metadata.json")
-    return os.path.exists(feature_path) and (os.path.exists(metadata_path) or os.path.exists(metadata_path_json))
+    
+    # For backward compatibility, also check for old joblib format
+    feature_path_joblib = os.path.join(FEATURE_CACHE_DIR, f"{cache_key}_features.joblib")
+    
+    return (os.path.exists(feature_path) or os.path.exists(feature_path_joblib)) and (os.path.exists(metadata_path) or os.path.exists(metadata_path_json))
 
 def save_features_to_disk(X, y, cache_key, labels_df_shape, time_series_shape):
     """Save features to disk with metadata."""
@@ -67,7 +71,8 @@ def save_features_to_disk(X, y, cache_key, labels_df_shape, time_series_shape):
     metadata_path = get_feature_metadata_path(cache_key)
     
     # Save features
-    joblib.dump((X, y), feature_path)
+    with open(feature_path, 'wb') as f:
+        pickle.dump((X, y), f)
     
     # Save metadata for validation
     metadata = {
@@ -93,8 +98,22 @@ def load_features_from_disk(cache_key):
     metadata_path = get_feature_metadata_path(cache_key)
     
     try:
-        # Load features
-        X, y = joblib.load(feature_path)
+        # Load features - try pickle first, then fall back to joblib for backward compatibility
+        feature_path_joblib = os.path.join(FEATURE_CACHE_DIR, f"{cache_key}_features.joblib")
+        
+        if os.path.exists(feature_path):
+            # New pickle format
+            with open(feature_path, 'rb') as f:
+                X, y = pickle.load(f)
+        elif os.path.exists(feature_path_joblib):
+            # Old joblib format - load and migrate to pickle
+            X, y = joblib.load(feature_path_joblib)
+            # Save in new pickle format for future use
+            with open(feature_path, 'wb') as f:
+                pickle.dump((X, y), f)
+            print(f"🔄 Migrated {cache_key} features from joblib to pickle format")
+        else:
+            raise FileNotFoundError(f"Feature file not found for {cache_key}")
         
         # Load metadata - try pickle first, fall back to JSON for backwards compatibility
         metadata_path_json = os.path.join(FEATURE_CACHE_DIR, f"{cache_key}_metadata.json")
@@ -587,8 +606,15 @@ def list_cached_features():
         print(f"📁 Feature cache directory '{FEATURE_CACHE_DIR}' does not exist")
         return []
     
-    cache_files = [f for f in os.listdir(FEATURE_CACHE_DIR) if f.endswith('_features.joblib')]
-    cache_keys = [f.replace('_features.joblib', '') for f in cache_files]
+    # Get both new (.pkl) and old (.joblib) cache files
+    cache_files_pkl = [f for f in os.listdir(FEATURE_CACHE_DIR) if f.endswith('_features.pkl')]
+    cache_files_joblib = [f for f in os.listdir(FEATURE_CACHE_DIR) if f.endswith('_features.joblib')]
+    
+    cache_keys_pkl = [f.replace('_features.pkl', '') for f in cache_files_pkl]
+    cache_keys_joblib = [f.replace('_features.joblib', '') for f in cache_files_joblib]
+    
+    # Combine and deduplicate (prefer .pkl over .joblib for display)
+    cache_keys = list(set(cache_keys_pkl + cache_keys_joblib))
     
     if cache_keys:
         print(f"📋 Available cached features in '{FEATURE_CACHE_DIR}':")
@@ -597,16 +623,27 @@ def list_cached_features():
                 metadata_path = get_feature_metadata_path(key)
                 metadata_path_json = os.path.join(FEATURE_CACHE_DIR, f"{key}_metadata.json")
                 
+                # Determine file format
+                feature_path_pkl = get_feature_cache_path(key)
+                feature_path_joblib = os.path.join(FEATURE_CACHE_DIR, f"{key}_features.joblib")
+                
+                if os.path.exists(feature_path_pkl):
+                    format_type = "pickle"
+                elif os.path.exists(feature_path_joblib):
+                    format_type = "joblib (legacy)"
+                else:
+                    format_type = "unknown"
+                
                 if os.path.exists(metadata_path):
                     with open(metadata_path, 'rb') as f:
                         metadata = pickle.load(f)
-                    print(f"  - {key}: {metadata['feature_shape']} features, cached {time.ctime(metadata['timestamp'])} (pickle)")
+                    print(f"  - {key}: {metadata['feature_shape']} features, cached {time.ctime(metadata['timestamp'])} ({format_type})")
                 elif os.path.exists(metadata_path_json):
                     with open(metadata_path_json, 'r') as f:
                         metadata = json.load(f)
-                    print(f"  - {key}: {metadata['feature_shape']} features, cached {time.ctime(metadata['timestamp'])} (json)")
+                    print(f"  - {key}: {metadata['feature_shape']} features, cached {time.ctime(metadata['timestamp'])} ({format_type})")
                 else:
-                    print(f"  - {key}: (metadata missing)")
+                    print(f"  - {key}: (metadata missing, {format_type})")
             except Exception as e:
                 print(f"  - {key}: (error reading metadata: {e})")
     else:
@@ -1352,130 +1389,155 @@ def create_hourly_consumption_comparison(real_labels_df, real_time_series, synth
     print(f"\n✅ Hourly consumption comparison saved to: {save_path}")
 
 
-def create_hourly_consumption_boxplot_comparison(real_labels_df, real_time_series, synthetic_labels_pred, synthetic_time_series, 
-                                               save_path='figures/hourly_consumption_boxplot_comparison.png'):
+def create_hourly_load_boxplot_comparison(real_df, synthetic_df, real_labels, synthetic_labels, save_path=None):
     """
-    Create a comparison boxplot of hourly consumption distributions between real and synthetic data.
-    Shows boxplots for each hour (0-23) with data colored by category labels.
+    Create a 24-hour comparison boxplot of load profiles grouped by labels.
+    For each label, compares df1 (solid) vs df2 (hatched).
     
     Args:
-        real_labels_df: DataFrame with real data labels (columns: ['ID', 'Category'])
-        real_time_series: DataFrame with real time series data (8760 rows × N columns)
-        synthetic_labels_pred: Array/Series with predicted labels for synthetic data
-        synthetic_time_series: DataFrame with synthetic time series data (8760 rows × M columns)
-        save_path: Path to save the figure
+        real_df: DataFrame, real profiles (8760 rows × N columns)
+        synthetic_df: DataFrame, synthetic profiles (8760 rows × M columns)
+        real_labels: DataFrame with columns ['ID', 'Label'] for real_df
+        synthetic_labels: DataFrame with columns ['ID', 'Label'] for synthetic_df
+        class_color_mapping: dict mapping label -> hex color
+        save_path: optional path to save the figure
     """
-    # Ensure datetime index
-    if not isinstance(real_time_series.index, pd.DatetimeIndex):
-        real_time_series.index = pd.to_datetime(real_time_series.index)
-    if not isinstance(synthetic_time_series.index, pd.DatetimeIndex):
-        synthetic_time_series.index = pd.to_datetime(synthetic_time_series.index)
+    color_map = get_consistent_color_mapping()
+    class_name_mapping = {
+        'EV_NoPV': 'EV',
+        'NONE': 'None',
+        'Only_PV': 'PV',
+        'PV+HP': 'PV+HP',
+        'EV+PV': 'EV+PV'
+    }
+
+    real_labels["ID"] = real_labels["ID"].astype(str)
+    syn_labels = pd.DataFrame(synthetic_labels, columns=["Category"])
+    syn_labels["ID"] = np.arange(1, len(syn_labels)+1).astype(str)
+
+    # --- 2. Melt both dataframes into long format ---
+    real_df_long = real_df.melt(ignore_index=False, var_name="ID", value_name="Load")
+    synthetic_df_long = synthetic_df.melt(ignore_index=False, var_name="ID", value_name="Load")
+
+        # Add hour of day
+    real_df_long["Hour"] = real_df_long.index.hour
+    synthetic_df_long["Hour"] = synthetic_df_long.index.hour
+
+    # Add labels
+    real_df_long = real_df_long.merge(real_labels, on="ID", how="left")
+    synthetic_df_long = synthetic_df_long.merge(syn_labels, on="ID", how="left")
+
+
+    # Add dataframe source
+    real_df_long["Source"] = "Real"
+    synthetic_df_long["Source"] = "Synthetic"
+
+    # Apply class name mapping
+    real_df_long["Category"] = real_df_long["Category"].map(class_name_mapping)
+    synthetic_df_long["Category"] = synthetic_df_long["Category"].map(class_name_mapping)
     
-    # Class name mapping
-    class_name_mapping = {'EV_NoPV': 'EV', 'NONE': 'None', 'Only_PV': 'PV', 'PV+HP': 'PV+HP', 'EV+PV': 'EV+PV'}
-    color_dict = get_consistent_color_mapping()
+    # --- 3. Set color mapping ---
+    unique_labels_real = real_df_long["Category"].unique()
+    unique_labels_synthetic = synthetic_df_long["Category"].unique()
+    all_unique_labels = sorted(set(list(unique_labels_real) + list(unique_labels_synthetic)))
+    palette = {label: color_map.get(label, "#999999") for label in all_unique_labels}
+
+    # Sort labels consistently
+    order_labels = [lbl for lbl in class_name_mapping.values() if lbl in all_unique_labels]
+
+    # Create combined dataframe with proper grouping for side-by-side boxes
+    df_combined = pd.concat([real_df_long, synthetic_df_long], axis=0)
     
-    # Create figure
-    fig, ax = plt.subplots(figsize=(15, 8))
+    # Create a combined grouping variable for both Category and Source
+    df_combined['Category_Source'] = df_combined['Category'] + '_' + df_combined['Source']
     
-    # Process real data
-    print("Processing real data...")
-    real_data_by_hour_category = {}
+    # Create color palette for the combined groups
+    combined_palette = {}
+    for category in order_labels:
+        base_color = palette[category]
+        combined_palette[f'{category}_Real'] = base_color
+        combined_palette[f'{category}_Synthetic'] = base_color
     
-    # Create label mapping for real data (ID -> Category)
-    real_label_map = real_labels_df.set_index('ID')['Category'].to_dict()
+    # Create the order for the combined groups (Real then Synthetic for each category)
+    combined_order = []
+    for category in order_labels:
+        combined_order.extend([f'{category}_Real', f'{category}_Synthetic'])
     
-    # Get hour from index and group data
-    hours = real_time_series.index.hour
-    for hour in range(24):
-        hour_mask = (hours == hour)
-        hour_data = real_time_series[hour_mask]  # All profiles for this hour across all days
+    # Filter the order to only include groups that exist in the data
+    existing_groups = df_combined['Category_Source'].unique()
+    combined_order = [group for group in combined_order if group in existing_groups]
+    
+    fig, ax = plt.subplots(figsize=(20, 8))
+    box = sns.boxplot(
+        data=df_combined,
+        x="Hour",
+        y="Load",
+        hue="Category_Source",
+        palette=combined_palette,
+        hue_order=combined_order,
+        width=0.6,
+        ax=ax,
+        showfliers=False
+    )
+    
+    # --- 5. Apply visual styling ---
+    # Style the boxes: Real = solid, Synthetic = hatched
+    for i, patch in enumerate(ax.artists):
+        # Determine if this is a synthetic box by checking the group name
+        group_name = combined_order[i % len(combined_order)]
         
-        for col in hour_data.columns:
-            if col in real_label_map:
-                category = class_name_mapping.get(real_label_map[col], real_label_map[col])
-                key = (hour, category, 'real')
-                if key not in real_data_by_hour_category:
-                    real_data_by_hour_category[key] = []
-                real_data_by_hour_category[key].extend(hour_data[col].dropna().values)
-    
-    # Process synthetic data
-    print("Processing synthetic data...")
-    synthetic_data_by_hour_category = {}
-    
-    # Create label mapping for synthetic data (column index -> Category)
-    synthetic_labels_mapped = pd.Series(synthetic_labels_pred).map(class_name_mapping).fillna(pd.Series(synthetic_labels_pred))
-    
-    hours = synthetic_time_series.index.hour
-    for hour in range(24):
-        hour_mask = (hours == hour)
-        hour_data = synthetic_time_series[hour_mask]  # All profiles for this hour across all days
+        if '_Synthetic' in group_name:
+            patch.set_hatch('////')
+            patch.set_alpha(0.7)
+        else:
+            patch.set_alpha(0.7)
         
-        for i, col in enumerate(hour_data.columns):
-            if i < len(synthetic_labels_mapped):
-                category = synthetic_labels_mapped.iloc[i]
-                key = (hour, category, 'synthetic')
-                if key not in synthetic_data_by_hour_category:
-                    synthetic_data_by_hour_category[key] = []
-                synthetic_data_by_hour_category[key].extend(hour_data[col].dropna().values)
+        patch.set_edgecolor('black')
+        patch.set_linewidth(1)
+
+    # --- 6. Create custom legend ---
+    # Remove the automatic legend since we have duplicates
+    ax.legend_.remove()
     
-    # Get all categories
-    all_categories = sorted(set([k[1] for k in real_data_by_hour_category.keys()] + 
-                              [k[1] for k in synthetic_data_by_hour_category.keys()]))
+    # Create custom legend elements
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
     
-    # Create boxplots
-    print("Creating boxplots...")
-    box_width = 0.15
-    category_offset = {cat: i * box_width * 2 for i, cat in enumerate(all_categories)}
-    
-    for hour in range(24):
-        for category in all_categories:
-            color = color_dict.get(category, '#95A5A6')
-            
-            # Real data boxplot (filled)
-            real_key = (hour, category, 'real')
-            if real_key in real_data_by_hour_category and len(real_data_by_hour_category[real_key]) > 0:
-                position = hour + category_offset[category] - box_width/2
-                bp = ax.boxplot(real_data_by_hour_category[real_key], positions=[position], 
-                              widths=box_width, patch_artist=True,
-                              boxprops=dict(facecolor=color, alpha=0.7, edgecolor='black'),
-                              medianprops=dict(color='black', linewidth=1.5),
-                              flierprops=dict(marker='o', markersize=1, alpha=0.5))
-            
-            # Synthetic data boxplot (outlined)
-            synthetic_key = (hour, category, 'synthetic')
-            if synthetic_key in synthetic_data_by_hour_category and len(synthetic_data_by_hour_category[synthetic_key]) > 0:
-                position = hour + category_offset[category] + box_width/2
-                bp = ax.boxplot(synthetic_data_by_hour_category[synthetic_key], positions=[position], 
-                              widths=box_width, patch_artist=True,
-                              boxprops=dict(facecolor='none', alpha=1, edgecolor=color, linewidth=2),
-                              medianprops=dict(color=color, linewidth=1.5),
-                              flierprops=dict(marker='s', markersize=1, alpha=0.5, markerfacecolor=color))
-    
-    # Customize plot
-    ax.set_xlabel('Hour of Day', fontsize=14)
-    ax.set_ylabel('Consumption (kWh)', fontsize=14)
-    ax.set_xticks(range(24))
-    ax.set_xticklabels([f'{h:02d}:00' for h in range(24)], rotation=45, ha='right')
-    ax.grid(True, alpha=0.3, axis='y')
-    
-    # Create legend
-    import matplotlib.patches as mpatches
     legend_elements = []
-    for category in all_categories:
-        color = color_dict.get(category, '#95A5A6')
-        legend_elements.append(mpatches.Rectangle((0, 0), 1, 1, facecolor=color, alpha=0.7, 
-                                                 edgecolor='black', label=f'{category} (Real)'))
-        legend_elements.append(mpatches.Rectangle((0, 0), 1, 1, facecolor='none', 
-                                                 edgecolor=color, linewidth=2, label=f'{category} (Synthetic)'))
     
-    ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=12)
+    # Add category colors
+    for category in order_labels:
+        color = palette[category]
+        legend_elements.append(Patch(facecolor=color, edgecolor='black', label=category))
     
+    # Add source type indicators
+    legend_elements.extend([
+        Patch(facecolor='gray', edgecolor='black', label='Real Data'),
+        Patch(facecolor='gray', edgecolor='black', hatch='///', label='Synthetic Data')
+    ])
+    
+    # --- 7. Finalize plot ---
+    plt.title("Comparison of Hourly Load Profiles by Category and Source", fontsize=16)
+    plt.xlabel("Hour of Day", fontsize=14)
+    plt.ylabel("Load [kWh]", fontsize=14)
+    
+    # Create the legend
+    ax.legend(handles=legend_elements, title="Categories & Sources", 
+              bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=12)
+    
+    # Set x-axis ticks for hours
+    ax.set_xticks(range(24))
+    ax.set_xticklabels([f'{h:02d}:00' for h in range(24)], rotation=45)
+    
+    plt.grid(True, alpha=0.3, axis='y')
     plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+
+    # Save or show
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.show()
-    
-    print(f"\n✅ Hourly consumption boxplot comparison saved to: {save_path}")
+
+
 
 
 def create_real_data_classifier(X_real, y_real):
@@ -1657,7 +1719,7 @@ def train_synthetic_data_models(X_real, y_real, scenario_name, force_retrain=Fal
     print("🚀 OPTIMIZED PERFORMANCE TEST 1")
     print("="*50)
     
-    # Pre-calculate all features with caching
+    # Pre-calculate all features with caching 
     print("📊 Pre-calculating all features with caching...")
     
     # Dictionary to store results for comparison
@@ -1863,12 +1925,12 @@ def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df
         synthetic_data_10000,
         save_path=save_path.replace(".svg", "_10000.svg").replace("label_distribution", "hourly_consumption")
     )
-    create_hourly_consumption_boxplot_comparison(
-        real_labels_df, 
+    create_hourly_load_boxplot_comparison(
         real_time_series, 
+        synthetic_data_10000, 
+        real_labels_df, 
         y_synthetic_10000_pred, 
-        synthetic_data_10000,
-        save_path=save_path.replace(".svg", "_10000_boxplot.svg").replace("label_distribution", "hourly_consumption")
+        save_path=save_path.replace(".svg", "_10000_boxplot.png").replace("label_distribution", "hourly_consumption")
     )
 
 
