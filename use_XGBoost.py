@@ -287,11 +287,17 @@ def get_or_train_real_data_model(X_real, y_real, model_name="real_data_classifie
         
         # For loaded models, we need to create test data for consistency
         # Use the same split parameters as training
-        _, X_test, _, y_test = train_test_split(
+        X_train_subset, X_test, y_train_subset, y_test = train_test_split(
             X_real, y_real, test_size=0.2, random_state=42, stratify=y_real
         )
+        cv_fold_metrics = collect_cv_fold_metrics(
+            X_train_subset,
+            y_train_subset,
+            n_splits=5,
+            random_seeds=(42,),
+        )
         
-        return model, X_test, y_test, label_encoder, classification_report_dict
+        return model, X_test, y_test, label_encoder, classification_report_dict, cv_fold_metrics
     else:
         if force_retrain:
             print(f"🔄 Force retraining model '{model_name}'...")
@@ -299,11 +305,11 @@ def get_or_train_real_data_model(X_real, y_real, model_name="real_data_classifie
             print(f"🔄 Training new model '{model_name}'...")
         
         # Train new model
-        model, X_test, y_test, label_encoder, classification_report_dict = create_real_data_classifier(X_real, y_real)
+        model, X_test, y_test, label_encoder, classification_report_dict, cv_fold_metrics = create_real_data_classifier(X_real, y_real)
         
         # Save the model
         save_model(model, label_encoder, classification_report_dict, model_name)
-        return model, X_test, y_test, label_encoder, classification_report_dict
+        return model, X_test, y_test, label_encoder, classification_report_dict, cv_fold_metrics
 
 def list_saved_models():
     """
@@ -343,7 +349,7 @@ def get_consistent_color_mapping():
     }
     return class_color_mapping
 
-def train_XGBoost_optimized(X, y, n_splits=5, random_state=42):
+def train_XGBoost_optimized(X, y, n_splits=5, random_state=42, return_best_model=True):
     """
     Optimized version of XGBoost training with improved performance:
     - Pre-encode labels once
@@ -359,8 +365,9 @@ def train_XGBoost_optimized(X, y, n_splits=5, random_state=42):
 
     # Initialize K-Fold Cross-Validation
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    best_accuracy = 0
+    best_accuracy = float('-inf')
     best_xgb_model = None
+    fold_metrics = []
 
     # Pre-compute XGBoost parameters
     xgb_params = {
@@ -391,18 +398,44 @@ def train_XGBoost_optimized(X, y, n_splits=5, random_state=42):
         # Make predictions and calculate accuracy
         y_pred = xgb_model.predict(X_test)
         fold_accuracy = accuracy_score(y_test, y_pred)
+
+        # Collect macro metrics for variability analysis
+        macro_f1 = f1_score(y_test, y_pred, average='macro', zero_division=0)
+        macro_precision = precision_score(y_test, y_pred, average='macro', zero_division=0)
+        macro_recall = recall_score(y_test, y_pred, average='macro', zero_division=0)
+
+        fold_metrics.append({
+            'fold': fold + 1,
+            'random_state': random_state,
+            'macro_f1': macro_f1,
+            'macro_precision': macro_precision,
+            'macro_recall': macro_recall,
+            'accuracy': fold_accuracy,
+        })
         
         # Check if this is the best model so far
         if fold_accuracy > best_accuracy:
+            best_accuracy = fold_accuracy
+        if return_best_model and fold_accuracy == best_accuracy:
             best_accuracy = fold_accuracy
             best_xgb_model = xgb_model
 
         print(f"Fold {fold + 1} Accuracy: {fold_accuracy:.4f}")
 
     print(f"Best Fold Accuracy: {best_accuracy:.4f}")
-    return best_xgb_model
+    if return_best_model:
+        return best_xgb_model, fold_metrics
+    return None, fold_metrics
 
-def train_XGBoost_with_proper_split_optimized(X, y, test_size=0.2, random_state=42):
+def train_XGBoost_with_proper_split_optimized(
+    X,
+    y,
+    test_size=0.2,
+    random_state=42,
+    collect_cv_metrics=False,
+    cv_n_splits=5,
+    cv_random_seeds=(42,),
+):
     """
     Optimized version of train_XGBoost_with_proper_split with improved performance.
     """
@@ -421,10 +454,59 @@ def train_XGBoost_with_proper_split_optimized(X, y, test_size=0.2, random_state=
     print(f"Number of classes: {len(np.unique(y_train_encoded))}")
 
     # Step 3: Use optimized XGBoost training
-    best_xgb_model = train_XGBoost_optimized(X_train, y_train, random_state=random_state)
+    best_xgb_model, initial_fold_metrics = train_XGBoost_optimized(
+        X_train,
+        y_train,
+        n_splits=cv_n_splits,
+        random_state=random_state,
+        return_best_model=True,
+    )
+
+    collected_fold_metrics = None
+    if collect_cv_metrics:
+        collected_fold_metrics = collect_cv_fold_metrics(
+            X_train,
+            y_train,
+            n_splits=cv_n_splits,
+            random_seeds=cv_random_seeds,
+            reuse_metrics=initial_fold_metrics,
+            reused_seed=random_state,
+        )
 
     print(f"Training completed successfully!")
-    return best_xgb_model, X_test, y_test, label_encoder
+    return best_xgb_model, X_test, y_test, label_encoder, collected_fold_metrics
+
+
+def collect_cv_fold_metrics(
+    X,
+    y,
+    n_splits=5,
+    random_seeds=(42,),
+    reuse_metrics=None,
+    reused_seed=None,
+):
+    """
+    Run cross-validation for one or more random seeds and aggregate fold-level metrics.
+    """
+    aggregated_metrics = []
+    if reuse_metrics:
+        aggregated_metrics.extend(reuse_metrics)
+
+    seen_seed = reused_seed if reuse_metrics else None
+
+    for seed in random_seeds:
+        if seen_seed is not None and seed == seen_seed:
+            continue
+        _, fold_metrics = train_XGBoost_optimized(
+            X,
+            y,
+            n_splits=n_splits,
+            random_state=seed,
+            return_best_model=False,
+        )
+        aggregated_metrics.extend(fold_metrics)
+
+    return aggregated_metrics
 
 
 def calculate_features_optimized(labels_df, time_series, scenario_name):
@@ -752,7 +834,7 @@ def load_10_000_unlabeled_synthetic_profiles(path: pathlib.Path=pathlib.Path("in
     """
     Loads the 10,000 unlabeled synthetic profiles from the input data.
     """
-    df = pd.read_csv(path / f"10000_profiles_all.csv", sep=get_sep(path / f"10000_profiles_all.csv"), index_col=0)
+    df = pd.read_parquet(path / f"10000_profiles_all.parquet")
     return df
 
 def load_synthetic_1000_profiles_per_type(path: pathlib.Path=pathlib.Path("input_data")):
@@ -761,7 +843,7 @@ def load_synthetic_1000_profiles_per_type(path: pathlib.Path=pathlib.Path("input
     """
     df_list = []
     for i, label in LABEL_DICT.items():
-        df = pd.read_csv(path / f"1000_profiles_{i}.csv", sep=get_sep(path / f"1000_profiles_{i}.csv"), index_col=0)
+        df = pd.read_parquet(path / f"1000_profiles_{i}.parquet")
         df_list.append(df)
 
     synthetic_timeSeries = pd.concat(df_list, axis=1)
@@ -776,7 +858,7 @@ def load_5000_synthetic_profiles_per_type(path: pathlib.Path=pathlib.Path("input
     """
     df_list = []
     for i, label in LABEL_DICT.items():
-        df = pd.read_csv(path / f"5000_profiles_{i}.csv", sep=get_sep(path / f"5000_profiles_{i}.csv"), index_col=0)
+        df = pd.read_parquet(path / f"5000_profiles_{i}.parquet")
         df_list.append(df)
 
     synthetic_timeSeries = pd.concat(df_list, axis=1)
@@ -819,9 +901,9 @@ def load_synthetic_profiles_in_originial_shape(path: pathlib.Path=pathlib.Path("
     df_list = []
     for i, label in LABEL_DICT.items():
         if label == "EV":
-            df = pd.read_csv(path / f"100_profiles_{i}.csv", sep=get_sep(path / f"100_profiles_{i}.csv"), index_col=0)
+            df = pd.read_parquet(path / f"100_profiles_{i}.parquet")
         else:
-            df = pd.read_csv(path / f"300_profiles_{i}.csv", sep=get_sep(path / f"300_profiles_{i}.csv"), index_col=0)
+            df = pd.read_parquet(path / f"300_profiles_{i}.parquet")
         df_list.append(df)
 
     synthetic_timeSeries = pd.concat(df_list, axis=1)
@@ -833,7 +915,7 @@ def load_1300_unlabeled_synthetic_profiles(path: pathlib.Path=pathlib.Path("inpu
     """
     Loads the 1300 unlabeled synthetic profiles from the input data.
     """
-    df = pd.read_csv(path / f"1300_profiles_all.csv", sep=get_sep(path / f"1300_profiles_all.csv"), index_col=0)
+    df = pd.read_parquet(path / f"1300_profiles_all.parquet")
     return df
 
 def create_1000_labels_df():
@@ -893,14 +975,14 @@ def load_1300_synthetic_profiles(path: pathlib.Path=pathlib.Path("input_data")):
     """
     Loads the 1300 synthetic profiles per type from the input data.
     """
-    df = pd.read_csv(path / "1300_profiles_all.csv", sep=get_sep(path / "1300_profiles_all.csv"), index_col=0)
+    df = pd.read_parquet(path / "1300_profiles_all.parquet")
     return df
 
 def load_10_000_synthetic_profiles(path: pathlib.Path=pathlib.Path("input_data")):
     """
     Loads the 10,000 synthetic profiles from the input data.
     """
-    df = pd.read_csv(path / "10000_profiles_all.csv", sep=get_sep(path / "10000_profiles_all.csv"), index_col=0)
+    df = pd.read_parquet(path / "10000_profiles_all.parquet")
     return df
 
 def create_labels_for_original_shape_synthetic_profiles():
@@ -1546,8 +1628,14 @@ def create_real_data_classifier(X_real, y_real):
     """
 
     print("🎯 Training XGBoost on real data and evaluating performance...")
-    best_xgb_model, X_test, y_test, label_encoder = train_XGBoost_with_proper_split_optimized(
-        X_real, y_real, test_size=0.2, random_state=42
+    best_xgb_model, X_test, y_test, label_encoder, cv_fold_metrics = train_XGBoost_with_proper_split_optimized(
+        X_real,
+        y_real,
+        test_size=0.2,
+        random_state=42,
+        collect_cv_metrics=True,
+        cv_n_splits=5,
+        cv_random_seeds=(42,),
     )
     # Make predictions on test set
     y_pred_encoded = best_xgb_model.predict(X_test)
@@ -1556,7 +1644,7 @@ def create_real_data_classifier(X_real, y_real):
     # Generate classification report
     classification_report_dict = classification_report(y_test, y_pred, output_dict=True)
 
-    return best_xgb_model, X_test, y_test, label_encoder, classification_report_dict
+    return best_xgb_model, X_test, y_test, label_encoder, classification_report_dict, cv_fold_metrics
 
 def create_real_data_performance_figure(classification_report_dict_real_data, classification_report_dict_synthetic_data, save_path='figures/real_data_performance.png'):
     """
@@ -1651,6 +1739,85 @@ def create_real_data_performance_figure(classification_report_dict_real_data, cl
     plt.show()
 
 
+def plot_cv_metric_dispersion(cv_results_by_experiment, save_path='figures/cv_metric_dispersion.svg'):
+    """
+    Create box plots visualising fold-to-fold variability for F1, precision, and recall.
+    
+    Args:
+        cv_results_by_experiment: Dict mapping experiment label -> list of fold metric dicts
+        save_path: Output path for the figure
+    """
+    if not cv_results_by_experiment:
+        print("⚠️ No cross-validation metrics provided for dispersion plot.")
+        return None
+    
+    metric_keys = [
+        ('macro_f1', 'Macro F1-Score'),
+        ('macro_precision', 'Macro Precision'),
+        ('macro_recall', 'Macro Recall'),
+    ]
+    
+    # Filter out experiments without metric data
+    filtered_items = []
+    for label, fold_metrics in cv_results_by_experiment.items():
+        if not fold_metrics:
+            print(f"⚠️ No fold metrics available for '{label}'; skipping in dispersion plot.")
+            continue
+        filtered_items.append((label, fold_metrics))
+    
+    if not filtered_items:
+        print("⚠️ All cross-validation metric collections were empty; skipping dispersion plot.")
+        return None
+
+    plt.style.use('default')
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6), sharey=True)
+    palette = sns.color_palette("husl", len(filtered_items))
+
+    for idx, (metric_key, title) in enumerate(metric_keys):
+        ax = axes[idx]
+        data = []
+        labels = []
+        for (label, fold_metrics), color in zip(filtered_items, palette):
+            values = [record.get(metric_key) for record in fold_metrics if record.get(metric_key) is not None]
+            if not values:
+                continue
+            data.append(values)
+            labels.append(label)
+
+        if not data:
+            ax.set_visible(False)
+            continue
+
+        box_props = ax.boxplot(
+            data,
+            patch_artist=True,
+            widths=0.6,
+        )
+
+        for patch, color in zip(box_props['boxes'], palette):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.7)
+            patch.set_edgecolor('black')
+            patch.set_linewidth(1.0)
+
+        for median in box_props['medians']:
+            median.set_color('#2c3e50')
+            median.set_linewidth(1.5)
+
+        ax.set_title(title, fontsize=14)
+        ax.set_xticks(range(1, len(labels) + 1))
+        ax.set_xticklabels(labels, rotation=35, ha='right', fontsize=11)
+        if idx == 0:
+            ax.set_ylabel("Score", fontsize=12)
+        ax.set_ylim(0, 1)
+        ax.grid(True, axis='y', alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.show()
+    print(f"✅ Cross-validation dispersion figure saved to: {save_path}")
+    return fig
+
 def calculate_all_synthetic_features(scenario_name, force_recalculate_features=False) -> dict[str, tuple[pd.DataFrame, pd.Series]]:
     # Original shape (1,300 profiles) - cached
     labels_df_1300 = create_labels_for_original_shape_synthetic_profiles()
@@ -1741,11 +1908,30 @@ def train_synthetic_data_models(X_real, y_real, scenario_name, force_retrain=Fal
         if not force_retrain and model_exists(model_name):
             print(f"🔄 Loading existing model '{model_name}'...")
             best_model, label_encoder, classification_report_dict = load_model(model_name)
+            X_train_subset, _, y_train_subset, _ = train_test_split(
+                X_data,
+                y_data,
+                test_size=0.2,
+                random_state=42,
+                stratify=y_data,
+            )
+            cv_fold_metrics = collect_cv_fold_metrics(
+                X_train_subset,
+                y_train_subset,
+                n_splits=5,
+                random_seeds=(42,),
+            )
 
         else:
             # For synthetic data, evaluate on real data (domain transfer)
-            best_model, X_test, y_test, label_encoder = train_XGBoost_with_proper_split_optimized(
-                X_data, y_data, test_size=0.2, random_state=42
+            best_model, X_test, y_test, label_encoder, cv_fold_metrics = train_XGBoost_with_proper_split_optimized(
+                X_data,
+                y_data,
+                test_size=0.2,
+                random_state=42,
+                collect_cv_metrics=True,
+                cv_n_splits=5,
+                cv_random_seeds=(42,),
             )
             y_real_encoded = label_encoder.transform(y_real)
             y_real_pred_encoded = best_model.predict(X_real)
@@ -1777,6 +1963,8 @@ def train_synthetic_data_models(X_real, y_real, scenario_name, force_retrain=Fal
             'train_size': round(len(y_data)*0.8),
             'eval_size': round(len(y_real)*0.2),
             'eval_data_source': eval_data_source,
+            'cv_fold_metrics': cv_fold_metrics,
+            'description': description,
         }
         
         performance_results[key] = classification_metrics
@@ -1934,6 +2122,278 @@ def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df
     )
 
 
+STAT_FEATURE_LABELS = [
+    "Mean",
+    "Standard Deviation",
+    "Minimum",
+    "Maximum",
+    "Median",
+    "Skewness",
+    "Peak-to-Peak",
+    "25th Percentile",
+    "75th Percentile",
+]
+
+
+def plot_stat(
+    arr_feature_real,
+    arr_feature_synth,
+    ax,
+    feature_label,
+    arr_feature_third=None,
+    series_labels=None,
+    descr_font_size=7,
+):
+    # Prepare data arrays and labels
+    data_arrays = [arr_feature_real, arr_feature_synth]
+    if series_labels is None:
+        labels = ['Real', 'Synthetic']
+    else:
+        labels = list(series_labels[:2])
+    
+    # Add third array if provided
+    if arr_feature_third is not None:
+        data_arrays.append(arr_feature_third)
+        if series_labels and len(series_labels) >= 3:
+            labels.append(series_labels[2])
+        else:
+            labels.append('Holdout')
+    
+    box_dict = ax.boxplot(data_arrays, vert=True, patch_artist=True)
+    palette = sns.color_palette("Set2", len(data_arrays))
+    for patch, color in zip(box_dict['boxes'], palette):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+        patch.set_edgecolor('black')
+    ax.set_xticklabels(labels)
+    ax.set_title(feature_label, fontweight='bold')
+    ax.set_ylabel('Value')
+    ax.grid()
+    
+    # Adjust text positioning based on number of boxes
+    num_boxes = len(data_arrays)
+    text_offset = 0.15 if num_boxes == 3 else 0.1
+    
+    for idx, box in enumerate(box_dict['boxes']):
+        x_pos = idx + 1
+        vertices = box.get_path().vertices
+        q1 = vertices[0, 1]
+        q3 = vertices[2, 1]
+        whiskers = [line.get_ydata()[1] for line in box_dict['whiskers'][idx*2:idx*2 + 2]]
+        medians = box_dict['medians'][idx].get_ydata()[0]
+        ax.text(x_pos + text_offset, q1, f'Q1: {q1:.2f}', va='center', fontsize=descr_font_size, color='blue')
+        ax.text(x_pos + text_offset, q3, f'Q3: {q3:.2f}', va='center', fontsize=descr_font_size, color='blue')
+        ax.text(x_pos + text_offset, medians, f'Med: {medians:.2f}', va='center', fontsize=descr_font_size, color='red')
+        ax.text(x_pos + text_offset, whiskers[0], f'Min: {whiskers[0]:.2f}', va='center', fontsize=descr_font_size, color='green')
+        ax.text(x_pos + text_offset, whiskers[1], f'Max: {whiskers[1]:.2f}', va='center', fontsize=descr_font_size, color='green')
+
+
+def plot_stats(
+    arr_features_real,
+    arr_features_synth,
+    arr_features_third=None,
+    feature_labels=None,
+    series_labels=None,
+    title='Comparison of Statistical Features',
+):
+    fig, axes = plt.subplots(nrows=3, ncols=3, figsize=(20, 15.5))
+    axes = axes.flatten()
+    feature_labels = feature_labels or STAT_FEATURE_LABELS
+
+    for idx, ax in enumerate(axes):
+        label = feature_labels[idx] if idx < len(feature_labels) else f"Feature {idx + 1}"
+        if arr_features_third is not None:
+            plot_stat(
+                arr_features_real[idx],
+                arr_features_synth[idx],
+                ax,
+                label,
+                arr_features_third[idx],
+                series_labels=series_labels,
+            )
+        else:
+            plot_stat(
+                arr_features_real[idx],
+                arr_features_synth[idx],
+                ax,
+                label,
+                series_labels=series_labels,
+            )
+
+    plt.suptitle(title, ha='center', fontsize=16, fontweight='bold')
+    plt.tight_layout(rect=(0, 0, 1, 0.96))
+    return fig
+
+
+def slice_time_series_by_category(time_series_df, labels_df):
+    """
+    Group time-series columns by category using the provided label dataframe.
+    
+    Args:
+        time_series_df: DataFrame where each column represents a profile ID.
+        labels_df: DataFrame with columns ['ID', 'Category'].
+    
+    Returns:
+        Dict mapping category name to a NumPy array of shape (timesteps, n_profiles).
+    """
+    if 'ID' not in labels_df or 'Category' not in labels_df:
+        raise ValueError("labels_df must contain 'ID' and 'Category' columns.")
+
+    column_lookup = {str(col): col for col in time_series_df.columns}
+    labels_df = labels_df.copy()
+    labels_df['ID'] = labels_df['ID'].astype(str)
+
+    category_arrays = {}
+    for category, ids in labels_df.groupby('Category')['ID']:
+        matching_columns = [column_lookup[id_] for id_ in ids if id_ in column_lookup]
+        if not matching_columns:
+            print(f"⚠️ No matching columns found in time series for category '{category}'. Skipping.")
+            continue
+        category_arrays[category] = time_series_df[matching_columns].to_numpy()
+
+    return category_arrays
+
+
+def compute_statistical_feature_arrays(category_arrays):
+    """
+    Calculate statistical feature arrays for each category.
+    
+    Args:
+        category_arrays: Dict mapping category -> np.ndarray of shape (timesteps, n_profiles)
+    
+    Returns:
+        Dict mapping category -> np.ndarray of shape (num_features, n_profiles)
+    """
+    feature_results = {}
+    for category, arr in category_arrays.items():
+        if arr.size == 0:
+            print(f"⚠️ Empty array encountered for category '{category}'. Skipping.")
+            continue
+        feature_results[category] = calc_features(arr, axis=0)
+    return feature_results
+
+
+def create_category_feature_statistics_plots(
+    real_time_series,
+    real_labels_df,
+    synthetic_time_series,
+    synthetic_labels_df,
+    save_dir='figures',
+    scenario_tag='synthetic',
+    holdout_time_series=None,
+    holdout_labels_df=None,
+    holdout_label='Holdout',
+):
+    """
+    Generate statistical comparison plots per category between real and synthetic profiles.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    real_category_arrays = slice_time_series_by_category(real_time_series, real_labels_df)
+    synth_category_arrays = slice_time_series_by_category(synthetic_time_series, synthetic_labels_df)
+    real_feature_arrays = compute_statistical_feature_arrays(real_category_arrays)
+    synth_feature_arrays = compute_statistical_feature_arrays(synth_category_arrays)
+
+    holdout_feature_arrays = None
+    holdout_series_labels = None
+    if holdout_time_series is not None and holdout_labels_df is not None:
+        holdout_category_arrays = slice_time_series_by_category(holdout_time_series, holdout_labels_df)
+        holdout_feature_arrays = compute_statistical_feature_arrays(holdout_category_arrays)
+        holdout_series_labels = holdout_label
+
+    for category in sorted(real_feature_arrays.keys()):
+        real_features = real_feature_arrays.get(category)
+        synth_features = synth_feature_arrays.get(category)
+
+        if real_features is None or synth_features is None:
+            print(f"⚠️ Missing feature arrays for category '{category}'. Skipping comparison.")
+            continue
+
+        third_features = None
+        series_labels = [f"Real {category}", f"Synthetic {category}"]
+        if holdout_feature_arrays and category in holdout_feature_arrays:
+            third_features = holdout_feature_arrays[category]
+            series_labels.append(f"{holdout_series_labels} {category}")
+
+        fig = plot_stats(
+            real_features,
+            synth_features,
+            arr_features_third=third_features,
+            feature_labels=STAT_FEATURE_LABELS,
+            series_labels=series_labels,
+            title=f"{category} Statistical Feature Comparison",
+        )
+
+        output_path = os.path.join(
+            save_dir,
+            f"stat_feature_comparison_{category}_{scenario_tag}.svg",
+        )
+        fig.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+        plt.close(fig)
+        print(f"✅ Statistical comparison for category '{category}' saved to: {output_path}")
+
+def calc_features(arr, axis):
+    """
+    Calculate statistical features of the input array along the specified axis.
+    Handles NaN values and edge cases safely.
+    """
+    # Safety check for NaN values in input
+    if np.isnan(arr).any():
+        print("Warning: NaN values detected in input array for feature calculation")
+        # Replace NaN values with 0 for calculation
+        arr = np.nan_to_num(arr, nan=0.0)
+    
+    # Initialize output array
+    arr_features = np.zeros((9, arr.shape[1] if axis == 0 else arr.shape[0]), dtype=np.float32)
+    
+    try:
+        # Calculate mean
+        arr_features[0] = np.mean(arr, axis=axis)
+        
+        # Calculate standard deviation
+        std = np.std(arr, axis=axis)
+        arr_features[1] = np.nan_to_num(std, nan=0.0)  # Replace NaN with 0
+        
+        # Calculate min and max
+        arr_features[2] = np.min(arr, axis=axis)
+        arr_features[3] = np.max(arr, axis=axis)
+        
+        # Calculate median
+        arr_features[4] = np.median(arr, axis=axis)
+        
+        # Calculate skewness with safety checks
+        try:
+            skewness = skew(arr, axis=axis)
+            # Replace NaN and inf values in skewness with 0
+            arr_features[5] = np.nan_to_num(skewness, nan=0.0, posinf=0.0, neginf=0.0)
+        except Exception as e:
+            print(f"Warning: Error calculating skewness: {e}")
+            arr_features[5] = 0.0
+        
+        # Calculate peak to peak range
+        arr_features[6] = np.ptp(arr, axis=axis)
+        
+        # Calculate quartiles
+        try:
+            arr_features[7] = np.percentile(arr, 25, axis=axis)
+            arr_features[8] = np.percentile(arr, 75, axis=axis)
+        except Exception as e:
+            print(f"Warning: Error calculating quartiles: {e}")
+            # If quartile calculation fails, use min and max as fallback
+            arr_features[7] = arr_features[2]  # Use min as lower quartile
+            arr_features[8] = arr_features[3]  # Use max as upper quartile
+    
+    except Exception as e:
+        print(f"Warning: Error in feature calculation: {e}")
+        # Return zeros if calculation fails
+        return np.zeros((9, arr.shape[1] if axis == 0 else arr.shape[0]), dtype=np.float32)
+    
+    # Final safety check for any remaining NaN values
+    if np.isnan(arr_features).any():
+        print("Warning: NaN values detected in calculated features")
+        arr_features = np.nan_to_num(arr_features, nan=0.0)
+    
+    return arr_features
 
 def main():
     """Main function with command line argument support."""
@@ -1970,7 +2430,7 @@ def main():
     print(f"Force retrain: {force_retrain}")
     print(f"Force recalculate features: {force_recalculate_features}")
     
-    real_model, X_test_real, y_test_real, label_encoder_real, classification_report_dict_real_data = get_or_train_real_data_model(
+    real_model, X_test_real, y_test_real, label_encoder_real, classification_report_dict_real_data, real_cv_fold_metrics = get_or_train_real_data_model(
         X_real, y_real, model_name=f"real_data_classifier_{SCENARIO_NAME}", force_retrain=force_retrain
     )
     performance_results_real_data = {
@@ -1990,6 +2450,8 @@ def main():
         'train_size': len(y_real) - len(y_test_real),
         'eval_size': len(y_real),
         'eval_data_source': "Real Data",
+        'cv_fold_metrics': real_cv_fold_metrics,
+        'description': 'Real Data (80% training folds)',
     }
 
     performance_results_synthetic_data_models = train_synthetic_data_models(
@@ -1998,6 +2460,33 @@ def main():
         scenario_name=SCENARIO_NAME,
         force_retrain=force_retrain, 
         force_recalculate_features=force_recalculate_features
+    )
+
+    print("\n" + "="*70)
+    print("Creating statistical feature comparisons for each category...")
+    print("="*70)
+    synthetic_time_series_original = load_synthetic_profiles_in_originial_shape()
+    synthetic_labels_original = create_labels_for_original_shape_synthetic_profiles()
+    create_category_feature_statistics_plots(
+        real_time_series,
+        real_labels_df,
+        synthetic_time_series_original,
+        synthetic_labels_original,
+        save_dir='figures',
+        scenario_tag=f"{SCENARIO_NAME}_synthetic1300",
+    )
+
+    cv_dispersion_inputs = {}
+    if performance_results_real_data.get('cv_fold_metrics'):
+        cv_dispersion_inputs[performance_results_real_data.get('description', 'Real Data')] = performance_results_real_data['cv_fold_metrics']
+    for key, metrics in performance_results_synthetic_data_models.items():
+        label = metrics.get('description', key)
+        if metrics.get('cv_fold_metrics'):
+            cv_dispersion_inputs[label] = metrics['cv_fold_metrics']
+
+    plot_cv_metric_dispersion(
+        cv_dispersion_inputs,
+        save_path=f'figures/cv_metric_dispersion_{SCENARIO_NAME}.svg'
     )
 
     compare_model_with_different_synthetic_training_sizes(performance_results_synthetic_data_models, performance_results_real_data, save_path=f'figures/performance_comparison_{SCENARIO_NAME}.svg')
