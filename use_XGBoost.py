@@ -2426,8 +2426,8 @@ def calc_features(arr, axis):
 def main():
     """Main function with command line argument support."""
 
-    force_retrain = False
-    force_recalculate_features = False
+    force_retrain = True
+    force_recalculate_features = True
     SCENARIO_NAME = "sum" # sum will include the sum as feature. "daily" will include daily features
 
     # load real data

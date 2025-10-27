@@ -8,7 +8,9 @@ import seaborn as sns
 from tqdm import tqdm
 
 
-from use_XGBoost import load_1300_unlabeled_synthetic_profiles
+from use_XGBoost import (load_1300_unlabeled_synthetic_profiles, 
+load_100_000_synthetic_profiles_per_type, load_5000_synthetic_profiles_per_type, 
+load_50_000_synthetic_profiles_per_type, calc_features, load_synthetic_1000_profiles_per_type)
 
 
 
@@ -117,7 +119,6 @@ def _plot_profile_pair(
     """
     import seaborn as sns
 
-    sns.set_theme(style="whitegrid")
     fig, ax = plt.subplots(figsize=(14, 5))
 
     base_index = pd.to_datetime(real_profiles.index)
@@ -142,8 +143,9 @@ def _plot_profile_pair(
         x="Hour",
         y="Load",
         hue="Series",
-        palette=["#1f77b4", "#ff7f0e"],
-        linewidth=1.2,
+        palette=sns.color_palette("Set2"),
+        linewidth=0.8,
+        alpha=0.75,
         ax=ax,
     )
 
@@ -155,68 +157,15 @@ def _plot_profile_pair(
 
     axis_end = hours_axis[-1] if len(hours_axis) else 1
     ax.set_xlim(1, axis_end)
+    ax.set_ylim(0, np.quantile(plotting_df["Load"], 0.99))
     ax.set_title(f"Load Profiles Comparison – {title_suffix}")
     ax.set_xlabel("Hour")
     ax.set_ylabel("Load")
     ax.legend(title="")
     fig.tight_layout()
 
-    if save_path:
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save_path, dpi=300)
-
-    plt.close(fig)
-
-
-def _plot_profile_difference(
-    real_id: str,
-    synthetic_id: str,
-    real_profiles: pd.DataFrame,
-    synthetic_profiles: pd.DataFrame,
-    *,
-    title_suffix: str,
-    save_path: Optional[pathlib.Path] = None,
-) -> None:
-    """
-    Plot the point-wise difference between paired profiles to highlight residual variation.
-    """
-    import seaborn as sns
-
-    sns.set_theme(style="whitegrid")
-    fig, ax = plt.subplots(figsize=(14, 5))
-
-    base_index = pd.to_datetime(real_profiles.index)
-    hours = (base_index - base_index[0]).total_seconds() / 3600.0
-    hours_axis = hours + 1.0
-    difference = (
-        real_profiles[real_id].to_numpy(dtype=float) - synthetic_profiles[synthetic_id].to_numpy(dtype=float)
-    )
-
-    sns.lineplot(
-        x=hours_axis,
-        y=difference,
-        color="#d62728",
-        linewidth=1.1,
-        ax=ax,
-    )
-
-    month_starts = pd.date_range(base_index.min().normalize(), base_index.max().normalize(), freq="MS")
-    month_starts = month_starts[month_starts >= base_index.min()]
-    month_positions = (month_starts - base_index[0]).total_seconds() / 3600.0 + 1.0
-    ax.set_xticks(month_positions)
-    ax.set_xticklabels(month_starts.strftime("%b"))
-
-    axis_end = hours_axis[-1] if len(hours_axis) else 1
-    ax.set_xlim(1, axis_end)
-    ax.axhline(0.0, color="black", linewidth=0.8, linestyle=":")
-    ax.set_title(f"Profile Difference (Real − Synthetic) – {title_suffix}")
-    ax.set_xlabel("Hour")
-    ax.set_ylabel("Load Difference")
-    fig.tight_layout()
-
-    if save_path:
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save_path, dpi=300)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=300)
 
     plt.close(fig)
 
@@ -225,6 +174,7 @@ def plot_top_profile_matches(
     dtw_results: pd.DataFrame,
     real_profiles: pd.DataFrame,
     synthetic_profiles: pd.DataFrame,
+    addon: str = "",
     *,
     output_dir: pathlib.Path = pathlib.Path("figures"),
 ) -> None:
@@ -242,8 +192,8 @@ def plot_top_profile_matches(
         best_cosine["synthetic_profile"],
         real_profiles,
         synthetic_profiles,
-        title_suffix=f"Highest Cosine Similarity ({best_cosine['cosine_similarity']:.4f})",
-        save_path=output_dir / "profiles_highest_cosine.png",
+        title_suffix=f"Highest Cosine Similarity ({best_cosine['cosine_similarity']:.2f})",
+        save_path=output_dir / f"profiles_highest_cosine{addon}.png",
     )
 
     _plot_profile_pair(
@@ -252,7 +202,7 @@ def plot_top_profile_matches(
         real_profiles,
         synthetic_profiles,
         title_suffix=f"Lowest DTW Distance ({best_dtw['dtw_distance']:.2f})",
-        save_path=output_dir / "profiles_lowest_dtw.png",
+        save_path=output_dir / f"profiles_lowest_dtw{addon}.png",
     )
 
 
@@ -293,3 +243,37 @@ plot_top_profile_matches(
     unlabeled_synthetic_data,
     output_dir=pathlib.Path("figures") / "profile_matches",
 )
+
+
+
+# now again for the synthetic data with 100 000 profiles
+synthetic_1000_profiles = load_synthetic_1000_profiles_per_type()
+medium_synthetic_data = load_5000_synthetic_profiles_per_type()
+large_synthetic_data = load_50_000_synthetic_profiles_per_type()
+# big_synthetic_data = load_100_000_synthetic_profiles_per_type()
+
+for syn_data in [synthetic_1000_profiles, medium_synthetic_data, large_synthetic_data]:
+    top_cosine_pairs = calculate_cosine_similarity(
+        real_time_series,
+        syn_data,
+        top_n=50,
+    )
+
+    dtw_results = use_DTW_on_most_similar_pairs(
+        top_cosine_pairs,
+        real_time_series,
+        syn_data,
+        top_k=50,
+    )
+
+    plot_top_profile_matches(
+        dtw_results,
+        real_time_series,
+        syn_data,
+        addon=f"_{syn_data.shape[1]}_profiles",
+        output_dir=pathlib.Path("figures") / "profile_matches",
+    )
+
+
+
+    # create privacy conform synthetic dataset from the 50 000 synthetic profiles
