@@ -207,73 +207,322 @@ def plot_top_profile_matches(
 
 
 
-# Model persistence configuration
-MODEL_DIR = "saved_models"
-DEFAULT_MODEL_NAME = "xgboost_classifier"
-
-# Feature caching system for performance optimization
-FEATURE_CACHE_DIR = "feature_cache"
-
-SCENARIO_NAME = "sum" # sum will include the sum as feature. "daily" will include daily features
-
-# load real data
-real_labels_df = pd.read_csv(pathlib.Path("input_data") / "fluvius_indicators.csv")
-real_labels_df.rename(columns={"EAN_ID": "ID", "label": "Category"}, inplace=True)
-real_labels_df["Category"] = real_labels_df["Category"].map({"standard": "None", "PV": "PV", "heat pump+PV": "HP+PV", "EV": "EV", "EV+PV": "EV+PV"})
-real_time_series = pd.read_csv(pathlib.Path("input_data") / "fluvius_wide_format.csv", index_col=0)
-
-unlabeled_synthetic_data = load_1300_unlabeled_synthetic_profiles()
-
-top_cosine_pairs = calculate_cosine_similarity(
-    real_time_series,
-    unlabeled_synthetic_data,
-    top_n=50,
-)
-
-dtw_results = use_DTW_on_most_similar_pairs(
-    top_cosine_pairs,
-    real_time_series,
-    unlabeled_synthetic_data,
-    top_k=50,
-)
-
-plot_top_profile_matches(
-    dtw_results,
-    real_time_series,
-    unlabeled_synthetic_data,
-    output_dir=pathlib.Path("figures") / "profile_matches",
-)
 
 
+SYNTHETIC_CATEGORY_ORDER = ["PV", "HP+PV", "EV", "EV+PV", "None"]
 
-# now again for the synthetic data with 100 000 profiles
-synthetic_1000_profiles = load_synthetic_1000_profiles_per_type()
-medium_synthetic_data = load_5000_synthetic_profiles_per_type()
-large_synthetic_data = load_50_000_synthetic_profiles_per_type()
-# big_synthetic_data = load_100_000_synthetic_profiles_per_type()
 
-for syn_data in [synthetic_1000_profiles, medium_synthetic_data, large_synthetic_data]:
+def _zscore_columns(df: pd.DataFrame) -> pd.DataFrame:
+    means = df.mean(axis=0)
+    stds = df.std(axis=0)
+    stds = stds.replace(0, 1.0)
+    return (df - means) / stds
+
+
+def compute_cosine_similarity_matrix(
+    real_profiles: pd.DataFrame,
+    synthetic_profiles: pd.DataFrame,
+) -> Tuple[np.ndarray, List[Any], List[Any]]:
+    real_cols = list(real_profiles.columns)
+    synthetic_cols = list(synthetic_profiles.columns)
+    real_matrix = real_profiles.to_numpy(dtype=np.float64)
+    synthetic_matrix = synthetic_profiles.to_numpy(dtype=np.float64)
+
+    real_norms = np.linalg.norm(real_matrix, axis=0)
+    synthetic_norms = np.linalg.norm(synthetic_matrix, axis=0)
+    real_norms[real_norms == 0.0] = np.finfo(float).eps
+    synthetic_norms[synthetic_norms == 0.0] = np.finfo(float).eps
+
+    similarity = (real_matrix.T @ synthetic_matrix) / np.outer(real_norms, synthetic_norms)
+    return similarity, real_cols, synthetic_cols
+
+
+def compress_to_monthly_typical_day(profiles: pd.DataFrame) -> pd.DataFrame:
+    profiles["month"] = pd.to_datetime(profiles.index).month
+    profiles["hour"] = pd.to_datetime(profiles.index).hour
+    grouped = profiles.groupby(["month", "hour"]).mean()
+    grouped = grouped.sort_index(level=[0, 1])
+    return grouped
+
+
+def compute_dtw_distance_matrix(
+    real_typical: pd.DataFrame,
+    synthetic_typical: pd.DataFrame,
+    real_cols: List[Any],
+    synthetic_cols: List[Any],
+    *,
+    desc: str,
+) -> np.ndarray:
+    distances = np.zeros((len(real_cols), len(synthetic_cols)), dtype=np.float64)
+    synthetic_series_list = [
+        synthetic_typical[col].to_numpy(dtype=np.float64) for col in synthetic_cols
+    ]
+    for i, real_id in enumerate(tqdm(real_cols, desc=desc)):
+        real_series = real_typical[real_id].to_numpy(dtype=np.float64)
+        for j, synthetic_series in enumerate(synthetic_series_list):
+            distances[i, j] = _dtw_distance(real_series, synthetic_series)
+    return distances
+
+
+def identify_sensitive_profiles(
+    real_profiles: pd.DataFrame,
+    synthetic_profiles: pd.DataFrame,
+    *,
+    cosine_threshold: float,
+    dtw_threshold: float,
+    dtw_desc: str,
+) -> Tuple[set, pd.DataFrame]:
+    real_z = _zscore_columns(real_profiles)
+    synthetic_z = _zscore_columns(synthetic_profiles)
+    cosine_matrix, real_cols, synthetic_cols = compute_cosine_similarity_matrix(real_z, synthetic_z)
+
+    real_typical = compress_to_monthly_typical_day(real_profiles)
+    synthetic_typical = compress_to_monthly_typical_day(synthetic_profiles)
+    real_typical = real_typical[real_cols]
+    synthetic_typical = synthetic_typical[synthetic_cols]
+
+    dtw_matrix = compute_dtw_distance_matrix(
+        real_typical,
+        synthetic_typical,
+        real_cols,
+        synthetic_cols,
+        desc=dtw_desc,
+    )
+
+    mask = (cosine_matrix >= cosine_threshold) & (dtw_matrix <= dtw_threshold)
+    flagged_pairs_indices = np.argwhere(mask)
+
+    if flagged_pairs_indices.size == 0:
+        return set(), pd.DataFrame(columns=["real_profile", "synthetic_profile", "cosine_similarity", "dtw_distance"])
+
+    records = []
+    flagged_ids = set()
+    for real_idx, syn_idx in flagged_pairs_indices:
+        syn_id = synthetic_cols[syn_idx]
+        flagged_ids.add(syn_id)
+        records.append(
+            {
+                "real_profile": real_cols[real_idx],
+                "synthetic_profile": syn_id,
+                "cosine_similarity": float(cosine_matrix[real_idx, syn_idx]),
+                "dtw_distance": float(dtw_matrix[real_idx, syn_idx]),
+            }
+        )
+
+    detail_df = pd.DataFrame(records)
+    return flagged_ids, detail_df
+
+
+def compute_basic_engineering_features(profiles: pd.DataFrame) -> pd.DataFrame:
+    feature_names = [
+        "mean",
+        "std",
+        "min",
+        "max",
+        "median",
+        "skewness",
+        "range",
+        "quartile_25",
+        "quartile_75",
+    ]
+    feature_array = calc_features(profiles.to_numpy(dtype=np.float32), axis=0)
+    feature_df = pd.DataFrame(
+        feature_array.T.astype(np.float64),
+        index=profiles.columns,
+        columns=feature_names,
+    )
+    return feature_df
+
+
+def assign_synthetic_categories(profiles: pd.DataFrame) -> pd.Series:
+    categories = SYNTHETIC_CATEGORY_ORDER
+    per_type = profiles.shape[1] // len(categories)
+    mapping = {}
+    for idx, category in enumerate(categories):
+        start = idx * per_type
+        end = start + per_type
+        columns = profiles.columns[start:end]
+        for col in columns:
+            mapping[col] = category
+    return pd.Series(mapping, name="Category")
+
+
+def find_best_feature_match(
+    target_id: Any,
+    target_features: pd.DataFrame,
+    candidate_features: pd.DataFrame,
+    candidate_categories: pd.Series,
+    used_candidates: set,
+    *,
+    target_category: Optional[str],
+) -> Optional[Any]:
+    available = candidate_features.drop(index=list(used_candidates), errors="ignore")
+    if target_category is not None and not available.empty:
+        category_mask = candidate_categories.loc[available.index] == target_category
+        available = available.loc[category_mask]
+    if available.empty:
+        return None
+
+    target_vector = target_features.loc[target_id].to_numpy(dtype=np.float64)
+    candidate_matrix = available.to_numpy(dtype=np.float64)
+    distances = np.linalg.norm(candidate_matrix - target_vector, axis=1)
+    best_idx = int(np.argmin(distances))
+    return available.index[best_idx]
+
+
+def generate_private_synthetic_dataset(
+    real_profiles,
+    cosine_threshold: float = 0.9,
+    dtw_threshold: float = 1000.0,
+    output_path: pathlib.Path = pathlib.Path("private_synthetic_data.parquet"),
+) -> Dict[str, Any]:
+
+    real_profiles = real_time_series.copy()
+    synthetic_primary = load_synthetic_1000_profiles_per_type()
+    synthetic_replacement = load_5000_synthetic_profiles_per_type()
+
+    primary_flags, primary_pairs = identify_sensitive_profiles(
+        real_profiles,
+        synthetic_primary,
+        cosine_threshold=cosine_threshold,
+        dtw_threshold=dtw_threshold,
+        dtw_desc="DTW (primary pool)",
+    )
+
+    replacement_flags, replacement_pairs = identify_sensitive_profiles(
+        real_profiles,
+        synthetic_replacement,
+        cosine_threshold=cosine_threshold,
+        dtw_threshold=dtw_threshold,
+        dtw_desc="DTW (replacement pool)",
+    )
+
+    replacement_clean = synthetic_replacement.drop(columns=list(replacement_flags), errors="ignore")
+    replacement_features = compute_basic_engineering_features(replacement_clean)
+    primary_features = compute_basic_engineering_features(synthetic_primary)
+
+    primary_categories = assign_synthetic_categories(synthetic_primary)
+    replacement_categories = assign_synthetic_categories(synthetic_replacement).loc[replacement_clean.columns]
+
+    working_primary = synthetic_primary.copy()
+    replacements: List[Dict[str, Any]] = []
+    dropped: List[Any] = []
+    used_replacements: set = set()
+
+    for profile_id in sorted(primary_flags):
+        if profile_id not in working_primary.columns:
+            continue
+        target_category = primary_categories.get(profile_id, None)
+        candidate_id = find_best_feature_match(
+            profile_id,
+            primary_features,
+            replacement_features,
+            replacement_categories,
+            used_replacements,
+            target_category=target_category,
+        )
+
+        if candidate_id is None:
+            working_primary.drop(columns=[profile_id], inplace=True, errors="ignore")
+            dropped.append(profile_id)
+            print(f"Dropped synthetic profile {profile_id} (no replacement available).")
+            continue
+
+        replacement_series = replacement_clean[candidate_id]
+        working_primary[profile_id] = replacement_series
+        used_replacements.add(candidate_id)
+        replacement_clean.drop(columns=[candidate_id], inplace=True, errors="ignore")
+        replacement_features.drop(index=[candidate_id], inplace=True, errors="ignore")
+        replacement_categories.drop(index=candidate_id, inplace=True, errors="ignore")
+
+        replacements.append(
+            {
+                "flagged_profile": profile_id,
+                "replacement_profile": candidate_id,
+            }
+        )
+
+    working_primary.to_parquet(output_path)
+
+    return {
+        "output_path": pathlib.Path(output_path),
+        "flagged_primary_pairs": primary_pairs,
+        "flagged_replacement_pairs": replacement_pairs,
+        "replacements": pd.DataFrame(replacements),
+        "dropped_profiles": dropped,
+    }
+
+
+def main(real_time_series):
+
+
+    unlabeled_synthetic_data = load_1300_unlabeled_synthetic_profiles()
+
     top_cosine_pairs = calculate_cosine_similarity(
         real_time_series,
-        syn_data,
+        unlabeled_synthetic_data,
         top_n=50,
     )
 
     dtw_results = use_DTW_on_most_similar_pairs(
         top_cosine_pairs,
         real_time_series,
-        syn_data,
+        unlabeled_synthetic_data,
         top_k=50,
     )
 
     plot_top_profile_matches(
         dtw_results,
         real_time_series,
-        syn_data,
-        addon=f"_{syn_data.shape[1]}_profiles",
+        unlabeled_synthetic_data,
         output_dir=pathlib.Path("figures") / "profile_matches",
     )
 
+    # now again for the synthetic data with 100 000 profiles
+    synthetic_1000_profiles = load_synthetic_1000_profiles_per_type()
+    medium_synthetic_data = load_5000_synthetic_profiles_per_type()
+    large_synthetic_data = load_50_000_synthetic_profiles_per_type()
+    # big_synthetic_data = load_100_000_synthetic_profiles_per_type()
+
+    for syn_data in [synthetic_1000_profiles, medium_synthetic_data, large_synthetic_data]:
+        top_cosine_pairs = calculate_cosine_similarity(
+            real_time_series,
+            syn_data,
+            top_n=50,
+        )
+
+        dtw_results = use_DTW_on_most_similar_pairs(
+            top_cosine_pairs,
+            real_time_series,
+            syn_data,
+            top_k=50,
+        )
+
+        plot_top_profile_matches(
+            dtw_results,
+            real_time_series,
+            syn_data,
+            addon=f"_{syn_data.shape[1]}_profiles",
+            output_dir=pathlib.Path("figures") / "profile_matches",
+        )
 
 
-    # create privacy conform synthetic dataset from the 50 000 synthetic profiles
+
+if __name__ == "__main__":
+    # Model persistence configuration
+    MODEL_DIR = "saved_models"
+    DEFAULT_MODEL_NAME = "xgboost_classifier"
+
+    # Feature caching system for performance optimization
+    FEATURE_CACHE_DIR = "feature_cache"
+
+    SCENARIO_NAME = "sum" # sum will include the sum as feature. "daily" will include daily features
+        # load real data
+    real_labels_df = pd.read_csv(pathlib.Path("input_data") / "fluvius_indicators.csv")
+    real_labels_df.rename(columns={"EAN_ID": "ID", "label": "Category"}, inplace=True)
+    real_labels_df["Category"] = real_labels_df["Category"].map({"standard": "None", "PV": "PV", "heat pump+PV": "HP+PV", "EV": "EV", "EV+PV": "EV+PV"})
+    real_time_series = pd.read_csv(pathlib.Path("input_data") / "fluvius_wide_format.csv", index_col=0)
+
+    generate_private_synthetic_dataset(real_time_series)
+
+    # main(real_time_series)
