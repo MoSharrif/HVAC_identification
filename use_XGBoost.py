@@ -17,7 +17,7 @@ import pickle
 import argparse
 
 
-LABEL_DICT = {"PV": "Only_PV", "heat_pump+PV": "PV+HP", "EV": "EV_NoPV", "EV+PV": "EV+PV", "None":"NONE" }
+LABEL_DICT = {"PV": "PV", "heat_pump+PV": "HP+PV", "EV": "EV", "EV+PV": "EV+PV", "None":"None"}
 
 # Model persistence configuration
 MODEL_DIR = "saved_models"
@@ -173,7 +173,7 @@ def validate_cached_features(cache_key, labels_df, time_series):
         print(f"⚠️  Error validating cache for {cache_key}: {e}")
         return False
 
-def save_model(model, label_encoder, classification_report_dict, model_name=DEFAULT_MODEL_NAME):
+def save_model(model, label_encoder, classification_report_dict, model_name=DEFAULT_MODEL_NAME, cv_fold_metrics=None):
     """
     Save the trained model, label encoder, and classification report.
     
@@ -182,6 +182,7 @@ def save_model(model, label_encoder, classification_report_dict, model_name=DEFA
         label_encoder: LabelEncoder used for the model
         classification_report_dict: Classification report dictionary
         model_name: Name for the saved model files
+        cv_fold_metrics: Optional list of dictionaries containing cross-validation metrics
     """
     ensure_model_directory()
     
@@ -189,6 +190,7 @@ def save_model(model, label_encoder, classification_report_dict, model_name=DEFA
     model_path = os.path.join(MODEL_DIR, f"{model_name}_model.joblib")
     encoder_path = os.path.join(MODEL_DIR, f"{model_name}_label_encoder.joblib")
     report_path = os.path.join(MODEL_DIR, f"{model_name}_classification_report.pkl")
+    cv_metrics_path = os.path.join(MODEL_DIR, f"{model_name}_cv_metrics.pkl")
     
     # Save model and encoder using joblib
     joblib.dump(model, model_path)
@@ -197,6 +199,12 @@ def save_model(model, label_encoder, classification_report_dict, model_name=DEFA
     # Save classification report as pickle
     with open(report_path, 'wb') as f:
         pickle.dump(classification_report_dict, f)
+
+    # Save CV fold metrics if provided
+    if cv_fold_metrics is not None:
+        with open(cv_metrics_path, 'wb') as f:
+            pickle.dump(cv_fold_metrics, f)
+        print(f"   CV Metrics: {cv_metrics_path}")
     
     print(f"✅ Model saved successfully:")
     print(f"   Model: {model_path}")
@@ -230,7 +238,7 @@ def load_model(model_name=DEFAULT_MODEL_NAME):
         model_name: Name of the model to load
         
     Returns:
-        tuple: (model, label_encoder, classification_report_dict)
+        tuple: (model, label_encoder, classification_report_dict, cv_fold_metrics)
         
     Raises:
         FileNotFoundError: If the model files don't exist
@@ -242,6 +250,7 @@ def load_model(model_name=DEFAULT_MODEL_NAME):
     model_path = os.path.join(MODEL_DIR, f"{model_name}_model.joblib")
     encoder_path = os.path.join(MODEL_DIR, f"{model_name}_label_encoder.joblib")
     report_path = os.path.join(MODEL_DIR, f"{model_name}_classification_report.pkl")
+    cv_metrics_path = os.path.join(MODEL_DIR, f"{model_name}_cv_metrics.pkl")
     
     # Load model and encoder
     model = joblib.load(model_path)
@@ -261,13 +270,20 @@ def load_model(model_name=DEFAULT_MODEL_NAME):
         print(f"🔄 Migrated {model_name} classification report from JSON to pickle format")
     else:
         raise FileNotFoundError(f"Classification report file not found for {model_name}")
+
+    cv_fold_metrics = None
+    if os.path.exists(cv_metrics_path):
+        with open(cv_metrics_path, 'rb') as f:
+            cv_fold_metrics = pickle.load(f)
+    else:
+        print(f"⚠️ CV metrics file not found for {model_name}.")
     
     print(f"✅ Model loaded successfully:")
     print(f"   Model: {model_path}")
     print(f"   Label Encoder: {encoder_path}")
     print(f"   Classification Report: {report_path}")
     
-    return model, label_encoder, classification_report_dict
+    return model, label_encoder, classification_report_dict, cv_fold_metrics
 
 def get_or_train_real_data_model(X_real, y_real, model_name="real_data_classifier", force_retrain=False):
     """
@@ -284,19 +300,21 @@ def get_or_train_real_data_model(X_real, y_real, model_name="real_data_classifie
     """
     if not force_retrain and model_exists(model_name):
         print(f"🔄 Loading existing model '{model_name}'...")
-        model, label_encoder, classification_report_dict = load_model(model_name)
+        model, label_encoder, classification_report_dict, cv_fold_metrics = load_model(model_name)
         
         # For loaded models, we need to create test data for consistency
         # Use the same split parameters as training
         X_train_subset, X_test, y_train_subset, y_test = train_test_split(
             X_real, y_real, test_size=0.2, random_state=42, stratify=y_real
         )
-        cv_fold_metrics = collect_cv_fold_metrics(
-            X_train_subset,
-            y_train_subset,
-            n_splits=5,
-            random_seeds=(42,),
-        )
+        if not cv_fold_metrics:
+            cv_fold_metrics = collect_cv_fold_metrics(
+                X_train_subset,
+                y_train_subset,
+                n_splits=5,
+                random_seeds=(42,),
+            )
+            save_model(model, label_encoder, classification_report_dict, model_name, cv_fold_metrics=cv_fold_metrics)
         
         return model, X_test, y_test, label_encoder, classification_report_dict, cv_fold_metrics
     else:
@@ -309,7 +327,7 @@ def get_or_train_real_data_model(X_real, y_real, model_name="real_data_classifie
         model, X_test, y_test, label_encoder, classification_report_dict, cv_fold_metrics = create_real_data_classifier(X_real, y_real)
         
         # Save the model
-        save_model(model, label_encoder, classification_report_dict, model_name)
+        save_model(model, label_encoder, classification_report_dict, model_name, cv_fold_metrics=cv_fold_metrics)
         return model, X_test, y_test, label_encoder, classification_report_dict, cv_fold_metrics
 
 def list_saved_models():
@@ -1507,6 +1525,9 @@ def create_hourly_load_boxplot_comparison(real_df, synthetic_df, real_labels, sy
     synthetic_df_long["Hour"] = synthetic_df_long.index.hour
 
     # Add labels
+    real_df_long["ID"] = real_df_long["ID"].astype(str)
+    synthetic_df_long["ID"] = synthetic_df_long["ID"].astype(str)
+    syn_labels["ID"] = syn_labels["ID"].astype(str)
     real_df_long = real_df_long.merge(real_labels, on="ID", how="left")
     synthetic_df_long = synthetic_df_long.merge(syn_labels, on="ID", how="left")
 
@@ -1520,9 +1541,9 @@ def create_hourly_load_boxplot_comparison(real_df, synthetic_df, real_labels, sy
     synthetic_df_long["Category"] = synthetic_df_long["Category"].map(class_name_mapping)
     
     # --- 3. Set color mapping ---
-    unique_labels_real = real_df_long["Category"].unique()
-    unique_labels_synthetic = synthetic_df_long["Category"].unique()
-    all_unique_labels = sorted(set(list(unique_labels_real) + list(unique_labels_synthetic)))
+    unique_labels_real = [lbl for lbl in real_df_long["Category"].dropna().unique()]
+    unique_labels_synthetic = [lbl for lbl in synthetic_df_long["Category"].dropna().unique()]
+    all_unique_labels = sorted(set(unique_labels_real + unique_labels_synthetic))
     palette = {label: color_map.get(label, "#999999") for label in all_unique_labels}
 
     # Sort labels consistently
@@ -1752,10 +1773,10 @@ def plot_cv_metric_dispersion(cv_results_by_experiment, save_path='figures/cv_me
         print("⚠️ No cross-validation metrics provided for dispersion plot.")
         return None
     
-    metric_keys = [
-        ('macro_f1', 'Macro F1-Score'),
-        ('macro_precision', 'Macro Precision'),
-        ('macro_recall', 'Macro Recall'),
+    metric_configs = [
+        ('macro_f1', 'Macro F1-Score', '#2E86AB'),
+        ('macro_precision', 'Macro Precision', '#F18F01'),
+        ('macro_recall', 'Macro Recall', '#C73E1D'),
     ]
     
     # Filter out experiments without metric data
@@ -1771,47 +1792,51 @@ def plot_cv_metric_dispersion(cv_results_by_experiment, save_path='figures/cv_me
         return None
 
     plt.style.use('default')
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6), sharey=True)
-    palette = sns.color_palette("husl", len(filtered_items))
+    fig, ax = plt.subplots(figsize=(10, 6))
+    experiment_labels = [label for label, _ in filtered_items]
+    num_experiments = len(experiment_labels)
+    positions = np.arange(num_experiments)
+    num_metrics = len(metric_configs)
+    width = 0.2
 
-    for idx, (metric_key, title) in enumerate(metric_keys):
-        ax = axes[idx]
-        data = []
-        labels = []
-        for (label, fold_metrics), color in zip(filtered_items, palette):
+    legend_handles = []
+    for idx, (metric_key, title, color) in enumerate(metric_configs):
+        metric_data = []
+        for _, fold_metrics in filtered_items:
             values = [record.get(metric_key) for record in fold_metrics if record.get(metric_key) is not None]
             if not values:
-                continue
-            data.append(values)
-            labels.append(label)
+                values = [np.nan]
+            metric_data.append(values)
 
-        if not data:
-            ax.set_visible(False)
-            continue
-
+        offset = (idx - (num_metrics - 1) / 2) * (width * 1.2)
         box_props = ax.boxplot(
-            data,
+            metric_data,
+            positions=positions + offset,
+            widths=width,
             patch_artist=True,
-            widths=0.6,
         )
 
-        for patch, color in zip(box_props['boxes'], palette):
+        for patch in box_props['boxes']:
             patch.set_facecolor(color)
             patch.set_alpha(0.7)
             patch.set_edgecolor('black')
             patch.set_linewidth(1.0)
 
-        for median in box_props['medians']:
-            median.set_color('#2c3e50')
-            median.set_linewidth(1.5)
+        for element in ['medians', 'caps', 'whiskers']:
+            for artist in box_props[element]:
+                if hasattr(artist, 'set_color'):
+                    artist.set_color(color if element == 'medians' else 'black')
+                if hasattr(artist, 'set_linewidth'):
+                    artist.set_linewidth(1.2 if element == 'medians' else 1.0)
 
-        ax.set_title(title, fontsize=14)
-        ax.set_xticks(range(1, len(labels) + 1))
-        ax.set_xticklabels(labels, rotation=35, ha='right', fontsize=11)
-        if idx == 0:
-            ax.set_ylabel("Score", fontsize=12)
-        ax.set_ylim(0, 1)
-        ax.grid(True, axis='y', alpha=0.3)
+        legend_handles.append(plt.Line2D([0], [0], color=color, linewidth=3, label=title))
+
+    ax.set_xticks(positions)
+    ax.set_xticklabels(experiment_labels, rotation=35, ha='right', fontsize=11)
+    ax.set_ylabel("Score", fontsize=14)
+    ax.set_ylim(0.7, 1.0)
+    ax.grid(True, axis='y', alpha=0.3)
+    ax.legend(handles=legend_handles, loc='lower right', fontsize=14)
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
@@ -1908,20 +1933,22 @@ def train_synthetic_data_models(X_real, y_real, scenario_name, force_retrain=Fal
 
         if not force_retrain and model_exists(model_name):
             print(f"🔄 Loading existing model '{model_name}'...")
-            best_model, label_encoder, classification_report_dict = load_model(model_name)
-            X_train_subset, _, y_train_subset, _ = train_test_split(
-                X_data,
-                y_data,
-                test_size=0.2,
-                random_state=42,
-                stratify=y_data,
-            )
-            cv_fold_metrics = collect_cv_fold_metrics(
-                X_train_subset,
-                y_train_subset,
-                n_splits=5,
-                random_seeds=(42,),
-            )
+            best_model, label_encoder, classification_report_dict, cv_fold_metrics = load_model(model_name)
+            if not cv_fold_metrics:
+                X_train_subset, _, y_train_subset, _ = train_test_split(
+                    X_data,
+                    y_data,
+                    test_size=0.2,
+                    random_state=42,
+                    stratify=y_data,
+                )
+                cv_fold_metrics = collect_cv_fold_metrics(
+                    X_train_subset,
+                    y_train_subset,
+                    n_splits=5,
+                    random_seeds=(42,),
+                )
+                save_model(best_model, label_encoder, classification_report_dict, model_name, cv_fold_metrics=cv_fold_metrics)
 
         else:
             # For synthetic data, evaluate on real data (domain transfer)
@@ -1940,7 +1967,7 @@ def train_synthetic_data_models(X_real, y_real, scenario_name, force_retrain=Fal
             
             eval_accuracy = accuracy_score(y_real_encoded, y_real_pred_encoded)
             classification_report_dict = classification_report(y_real, y_real_pred, output_dict=True)
-            save_model(best_model, label_encoder, classification_report_dict, model_name)
+            save_model(best_model, label_encoder, classification_report_dict, model_name, cv_fold_metrics=cv_fold_metrics)
 
 
         eval_data_source = "Real Data"
@@ -1991,7 +2018,7 @@ def label_synthetic_data_and_compare_distribution(X_real, y_real, real_labels_df
 
     if not force_retrain and model_exists(model_name):
         print(f"🔄 Loading existing model '{model_name}'...")
-        xgb_real_model, label_encoder_real_full, _ = load_model(model_name)
+        xgb_real_model, label_encoder_real_full, _, _ = load_model(model_name)
     else:
         # Step 1: Train XGBoost model on ALL real data - REUSE CACHED FEATURES AND EXISTING MODEL
         print("\n🎯 Step 1: Training XGBoost on ALL real data...")
@@ -2406,7 +2433,7 @@ def main():
     # load real data
     real_labels_df = pd.read_csv(pathlib.Path("input_data") / "fluvius_indicators.csv")
     real_labels_df.rename(columns={"EAN_ID": "ID", "label": "Category"}, inplace=True)
-    real_labels_df["Category"] = real_labels_df["Category"].map({"standard": "NONE", "PV": "Only_PV", "heat pump+PV": "PV+HP", "EV": "EV_NoPV", "EV+PV": "EV+PV"})
+    real_labels_df["Category"] = real_labels_df["Category"].map({"standard": "None", "PV": "PV", "heat pump+PV": "HP+PV", "EV": "EV", "EV+PV": "EV+PV"})
     real_time_series = pd.read_csv(pathlib.Path("input_data") / "fluvius_wide_format.csv", index_col=0)
 
     # OPTIMIZATION: Pre-calculate features for all datasets to avoid redundant calculations
