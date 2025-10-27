@@ -103,6 +103,160 @@ def use_DTW_on_most_similar_pairs(
     return results_df
 
 
+def _plot_profile_pair(
+    real_id: str,
+    synthetic_id: str,
+    real_profiles: pd.DataFrame,
+    synthetic_profiles: pd.DataFrame,
+    *,
+    title_suffix: str,
+    save_path: Optional[pathlib.Path] = None,
+) -> None:
+    """
+    Plot a real/synthetic profile pair across the full year (8760 points).
+    """
+    import seaborn as sns
+
+    sns.set_theme(style="whitegrid")
+    fig, ax = plt.subplots(figsize=(14, 5))
+
+    base_index = pd.to_datetime(real_profiles.index)
+    hours = (base_index - base_index[0]).total_seconds() / 3600.0
+    hours_axis = hours + 1.0
+
+    plotting_df = pd.DataFrame(
+        {
+            "Hour": np.concatenate([hours_axis, hours_axis]),
+            "Load": np.concatenate(
+                [
+                    real_profiles[real_id].to_numpy(dtype=float),
+                    synthetic_profiles[synthetic_id].to_numpy(dtype=float),
+                ]
+            ),
+            "Series": ["Real"] * len(hours) + ["Synthetic"] * len(hours),
+        }
+    )
+
+    sns.lineplot(
+        data=plotting_df,
+        x="Hour",
+        y="Load",
+        hue="Series",
+        palette=["#1f77b4", "#ff7f0e"],
+        linewidth=1.2,
+        ax=ax,
+    )
+
+    month_starts = pd.date_range(base_index.min().normalize(), base_index.max().normalize(), freq="MS")
+    month_starts = month_starts[month_starts >= base_index.min()]
+    month_positions = (month_starts - base_index[0]).total_seconds() / 3600.0 + 1.0
+    ax.set_xticks(month_positions)
+    ax.set_xticklabels(month_starts.strftime("%b"))
+
+    axis_end = hours_axis[-1] if len(hours_axis) else 1
+    ax.set_xlim(1, axis_end)
+    ax.set_title(f"Load Profiles Comparison – {title_suffix}")
+    ax.set_xlabel("Hour")
+    ax.set_ylabel("Load")
+    ax.legend(title="")
+    fig.tight_layout()
+
+    if save_path:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=300)
+
+    plt.close(fig)
+
+
+def _plot_profile_difference(
+    real_id: str,
+    synthetic_id: str,
+    real_profiles: pd.DataFrame,
+    synthetic_profiles: pd.DataFrame,
+    *,
+    title_suffix: str,
+    save_path: Optional[pathlib.Path] = None,
+) -> None:
+    """
+    Plot the point-wise difference between paired profiles to highlight residual variation.
+    """
+    import seaborn as sns
+
+    sns.set_theme(style="whitegrid")
+    fig, ax = plt.subplots(figsize=(14, 5))
+
+    base_index = pd.to_datetime(real_profiles.index)
+    hours = (base_index - base_index[0]).total_seconds() / 3600.0
+    hours_axis = hours + 1.0
+    difference = (
+        real_profiles[real_id].to_numpy(dtype=float) - synthetic_profiles[synthetic_id].to_numpy(dtype=float)
+    )
+
+    sns.lineplot(
+        x=hours_axis,
+        y=difference,
+        color="#d62728",
+        linewidth=1.1,
+        ax=ax,
+    )
+
+    month_starts = pd.date_range(base_index.min().normalize(), base_index.max().normalize(), freq="MS")
+    month_starts = month_starts[month_starts >= base_index.min()]
+    month_positions = (month_starts - base_index[0]).total_seconds() / 3600.0 + 1.0
+    ax.set_xticks(month_positions)
+    ax.set_xticklabels(month_starts.strftime("%b"))
+
+    axis_end = hours_axis[-1] if len(hours_axis) else 1
+    ax.set_xlim(1, axis_end)
+    ax.axhline(0.0, color="black", linewidth=0.8, linestyle=":")
+    ax.set_title(f"Profile Difference (Real − Synthetic) – {title_suffix}")
+    ax.set_xlabel("Hour")
+    ax.set_ylabel("Load Difference")
+    fig.tight_layout()
+
+    if save_path:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=300)
+
+    plt.close(fig)
+
+
+def plot_top_profile_matches(
+    dtw_results: pd.DataFrame,
+    real_profiles: pd.DataFrame,
+    synthetic_profiles: pd.DataFrame,
+    *,
+    output_dir: pathlib.Path = pathlib.Path("figures"),
+) -> None:
+    """
+    Plot profile pairs with the highest cosine similarity and the lowest DTW distance.
+    """
+    if dtw_results.empty:
+        raise ValueError("DTW results are empty. Compute DTW before plotting.")
+
+    best_cosine = dtw_results.loc[dtw_results["cosine_similarity"].idxmax()]
+    best_dtw = dtw_results.loc[dtw_results["dtw_distance"].idxmin()]
+
+    _plot_profile_pair(
+        best_cosine["real_profile"],
+        best_cosine["synthetic_profile"],
+        real_profiles,
+        synthetic_profiles,
+        title_suffix=f"Highest Cosine Similarity ({best_cosine['cosine_similarity']:.4f})",
+        save_path=output_dir / "profiles_highest_cosine.png",
+    )
+
+    _plot_profile_pair(
+        best_dtw["real_profile"],
+        best_dtw["synthetic_profile"],
+        real_profiles,
+        synthetic_profiles,
+        title_suffix=f"Lowest DTW Distance ({best_dtw['dtw_distance']:.2f})",
+        save_path=output_dir / "profiles_lowest_dtw.png",
+    )
+
+
+
 # Model persistence configuration
 MODEL_DIR = "saved_models"
 DEFAULT_MODEL_NAME = "xgboost_classifier"
@@ -133,5 +287,9 @@ dtw_results = use_DTW_on_most_similar_pairs(
     top_k=50,
 )
 
-
-
+plot_top_profile_matches(
+    dtw_results,
+    real_time_series,
+    unlabeled_synthetic_data,
+    output_dir=pathlib.Path("figures") / "profile_matches",
+)
